@@ -1,0 +1,9 @@
+[project]
+name = "pi-time-lapse"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "ipython>=9.2.0",
+]
