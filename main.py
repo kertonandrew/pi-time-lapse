@@ -2,13 +2,15 @@ import time
 import os
 import subprocess
 from pathlib import Path
-from utils.logger import get_logger
+from logger import get_logger
+
 
 from camera import take_photo
 from pijuice_config import configure_pijuice
 
-PROJECT_ROOT =  Path(os.getcwd())
+PROJECT_ROOT = Path(os.getcwd())
 logger = get_logger()
+
 
 def main(test_mode=False):
     logger.info("Starting timelapse script")
@@ -24,9 +26,11 @@ def main(test_mode=False):
     time.sleep(1)  # Give time for log to write
 
     # Execute shutdown command
-    subprocess.call(['sudo', 'shutdown', '-h', 'now'])
+    subprocess.call(["sudo", "shutdown", "-h", "now"])
+
 
 if __name__ == "__main__":
     import sys
+
     test_mode = "--test" in sys.argv
     main(test_mode)

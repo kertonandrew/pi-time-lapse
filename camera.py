@@ -2,10 +2,12 @@ import os
 import time
 import datetime
 from picamera2 import Picamera2
-from utils.logger import get_logger
+from logger import get_logger
+
 
 # Setup logging
 logger = get_logger()
+
 
 def take_photo(photos_dir):
     try:
