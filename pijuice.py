@@ -1,5 +1,4 @@
-#!/usr/bin/python3
-import os
+
 from pathlib import Path
 from pijuice import PiJuice
 from datetime import datetime
