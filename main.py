@@ -1,32 +1,33 @@
-
+#!/usr/bin/python3
 import time
+import os
 import subprocess
-import logging
+from pathlib import Path
+from utils.logger import get_logger
 
-from take_photo import take_photo
+from camera import take_photo
+from pijuice import configure_pijuice
 
-# Setup logging
-logging.basicConfig(
-    filename='/home/pi/timelapse.log',
-    level=logging.INFO,
-    format='%(asctime)s - %(message)s'
-)
+PROJECT_ROOT =  Path(os.getcwd())
+logger = get_logger()
 
-def main():
-    logging.info("Starting timelapse script")
+def main(test_mode=False):
+    logger.info("Starting timelapse script")
 
-    # Take photo
-    success = take_photo()
+    configure_pijuice(test_mode)
+    take_photo(path=PROJECT_ROOT / "photos")
 
     # Allow time for file writing to complete
     time.sleep(1)
 
     # Return to deep sleep by shutting down
-    logging.info("Preparing for shutdown")
+    logger.info("Preparing for shutdown")
     time.sleep(1)  # Give time for log to write
 
     # Execute shutdown command
     subprocess.call(['sudo', 'shutdown', '-h', 'now'])
 
 if __name__ == "__main__":
-    main()
+    import sys
+    test_mode = "--test" in sys.argv
+    main(test_mode)

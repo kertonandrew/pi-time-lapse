@@ -2,19 +2,14 @@ import os
 import time
 import datetime
 from picamera2 import Picamera2
-import logging
+from utils.logger import get_logger
 
 # Setup logging
-logging.basicConfig(
-    filename='/home/pi/timelapse.log',
-    level=logging.INFO,
-    format='%(asctime)s - %(message)s'
-)
+logger = get_logger()
 
-def take_photo():
+def take_photo(photos_dir):
     try:
         # Create photos directory if it doesn't exist
-        photos_dir = "/home/pi/photos"
         if not os.path.exists(photos_dir):
             os.makedirs(photos_dir)
 
@@ -23,7 +18,7 @@ def take_photo():
         filename = f"{photos_dir}/image_{timestamp}.jpg"
 
         # Initialize camera with proper configuration
-        logging.info("Initializing camera...")
+        logger.info("Initializing camera...")
         picam2 = Picamera2()
 
         # Create a configuration for still capture
@@ -34,7 +29,7 @@ def take_photo():
         picam2.start()
 
         # Wait for auto-exposure to complete
-        logging.info("Waiting for auto exposure to stabilize...")
+        logger.info("Waiting for auto exposure to stabilize...")
         picam2.set_controls({"AeEnable": True})  # Ensure auto-exposure is enabled
 
         # Use the built-in method for letting auto-exposure settle
@@ -43,15 +38,13 @@ def take_photo():
         picam2.switch_mode_and_capture_array(config)  # Trigger AE convergence
 
         # Take the actual photo
-        logging.info(f"Taking photo: {filename}")
+        logger.info(f"Taking photo: {filename}")
         picam2.capture_file(filename)
 
         # Close camera
         picam2.close()
 
-        logging.info("Photo captured successfully")
-        return True
+        logger.info("Photo captured successfully")
 
     except Exception as e:
-        logging.error(f"Error taking photo: {str(e)}")
-        return False
+        logger.error(f"Error taking photo: {str(e)}")
