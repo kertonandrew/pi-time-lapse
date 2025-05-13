@@ -5,7 +5,7 @@ from pathlib import Path
 from utils.logger import get_logger
 
 from camera import take_photo
-from pijuice import configure_pijuice
+from pijuice_config import configure_pijuice
 
 PROJECT_ROOT =  Path(os.getcwd())
 logger = get_logger()
