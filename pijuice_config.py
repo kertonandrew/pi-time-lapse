@@ -1,10 +1,10 @@
-
 from pathlib import Path
 from pijuice import PiJuice
 from datetime import datetime
-from utils.logger import get_logger
+from logger import get_logger
 
 logger = get_logger()
+
 
 def configure_pijuice(test_mode=False):
     # Initialize PiJuice
@@ -17,10 +17,7 @@ def configure_pijuice(test_mode=False):
 
     # Configure the system event
     system_events = pijuice.config.GetSystemEvents()
-    system_events['wake_up'] = {
-        'enabled': True,
-        'command': f'python3 {script_path}'
-    }
+    system_events["wake_up"] = {"enabled": True, "command": f"python3 {script_path}"}
     pijuice.config.SetSystemEvents(system_events)
 
     if test_mode:
@@ -41,11 +38,7 @@ def configure_pijuice(test_mode=False):
     if current_hour < 6 or current_hour > 18:
         # Calculate next wake time (e.g., 8:00 AM)
         logger.info("Nighttime detected, setting wake time for 8:00 AM")
-        next_wake = {
-            'day': 'EVERY_DAY',
-            'hour': 8,
-            'minute': 0
-        }
+        next_wake = {"day": "EVERY_DAY", "hour": 8, "minute": 0}
     else:
         # During day, set next wake for current hour + 30 minutes
         current_minute = datetime.now().minute
@@ -57,12 +50,10 @@ def configure_pijuice(test_mode=False):
             next_minute = next_minute % 60
             next_hour = (current_hour + 1) % 24
 
-        logger.info(f"Daytime detected, setting wake time for {next_hour}:{next_minute:02d}")
-        next_wake = {
-            'day': 'EVERY_DAY',
-            'hour': next_hour,
-            'minute': next_minute
-        }
+        logger.info(
+            f"Daytime detected, setting wake time for {next_hour}:{next_minute:02d}"
+        )
+        next_wake = {"day": "EVERY_DAY", "hour": next_hour, "minute": next_minute}
 
     pijuice.rtcAlarm.SetAlarm(next_wake)
     pijuice.rtcAlarm.SetWakeupEnabled(True)

@@ -2,11 +2,13 @@ import os
 import logging
 from pathlib import Path
 
-PROJECT_ROOT =  Path(os.getcwd())
+PROJECT_ROOT = Path(os.getcwd())
 LOG_DIR = PROJECT_ROOT / "logs"
+
 
 # Ensure log directory exists
 os.makedirs(LOG_DIR, exist_ok=True)
+
 
 # Configure logger
 def get_logger(name="pijuice_controller"):
@@ -18,7 +20,9 @@ def get_logger(name="pijuice_controller"):
     console_handler = logging.StreamHandler()
 
     # Create formatters
-    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    formatter = logging.Formatter(
+        "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    )
     file_handler.setFormatter(formatter)
     console_handler.setFormatter(formatter)
 
