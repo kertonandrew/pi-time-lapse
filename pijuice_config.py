@@ -1,4 +1,3 @@
-from pathlib import Path
 from pijuice import PiJuice
 from datetime import datetime
 from logger import get_logger
@@ -11,14 +10,7 @@ def configure_pijuice(test_mode=False):
     pijuice = PiJuice(1, 0x14)
 
     # Configure script to run on wake up
-    PROJECT_ROOT = Path(__file__).resolve().parent
-    script_path = PROJECT_ROOT / "main.py"
     pijuice.power.SetWakeUpOnCharge(0)  # Disable wake on charge
-
-    # Configure the system event
-    system_events = pijuice.config.GetSystemEvents()
-    system_events["wake_up"] = {"enabled": True, "command": f"python3 {script_path}"}
-    pijuice.config.SetSystemEvents(system_events)
 
     if test_mode:
         # In testing mode, use periodic wakeup every minute
