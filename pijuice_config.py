@@ -8,26 +8,17 @@ logger = get_logger()
 def configure_pijuice(test_mode=False):
     # Initialize PiJuice
     pijuice = PiJuice(1, 0x14)
-
-    # Configure script to run on wake up
     pijuice.power.SetWakeUpOnCharge(0)  # Disable wake on charge
-
-    if test_mode:
-        # In testing mode, use periodic wakeup every minute
-        logger.info("Testing mode enabled, setting wake time for every minute")
-        pijuice.rtcAlarm.SetPeriodicWakeup(1, "MINUTE")
-        pijuice.rtcAlarm.SetPeriodicWakeupEnabled(True)
-        return
 
     # Get current hour
     current_hour = datetime.now().hour
     logger.info(f"Current hour: {current_hour}")
 
-    # Disable any periodic wakeup that might be set
-    pijuice.rtcAlarm.SetPeriodicWakeupEnabled(False)
-
     # Only set wake alarm if current time is night (so it wakes in day)
-    if current_hour < 6 or current_hour > 18:
+    if test_mode:
+        logger.info("Testing mode enabled, setting wake time for every minute")
+        next_wake = {"day": "EVERY_DAY", "hour": "EVERY_HOUR", "minute": 0}
+    elif current_hour < 6 or current_hour > 18:
         # Calculate next wake time (e.g., 8:00 AM)
         logger.info("Nighttime detected, setting wake time for 8:00 AM")
         next_wake = {"day": "EVERY_DAY", "hour": 8, "minute": 0}
