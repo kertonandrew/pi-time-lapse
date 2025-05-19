@@ -16,7 +16,7 @@ def main(test_mode=False):
     logger.info("Starting timelapse script")
 
     configure_pijuice(test_mode)
-    take_photo(path=PROJECT_ROOT / "photos")
+    take_photo(PROJECT_ROOT / "photos")
 
     # Allow time for file writing to complete
     time.sleep(1)
