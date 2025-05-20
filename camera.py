@@ -50,3 +50,20 @@ def take_photo(photos_dir):
 
     except Exception as e:
         logger.error(f"Error taking photo: {str(e)}")
+
+
+def test_camera():
+    from logger import get_logger
+    from pathlib import Path
+
+    logger = get_logger()
+
+    logger.info("Starting timelapse script")
+
+    PROJECT_ROOT = Path(os.getcwd())
+
+    logger.info("photos_dir: %s", PROJECT_ROOT / "test_photos")
+
+    take_photo(PROJECT_ROOT / "test_photos")
+
+    logger.info("test_camera script completed")
