@@ -1,9 +1,7 @@
 [project]
 name = "pi-time-lapse"
 version = "0.1.0"
-description = "Add your description here"
+description = "Durable Raspberry Pi timelapse capture and power-aware image transfer"
 readme = "README.md"
 requires-python = ">=3.11"
-dependencies = [
-    "ipython>=9.2.0",
-]
+dependencies = []

@@ -1,0 +1,19 @@
+[Unit]
+Description=Capture one durable timelapse photograph
+After=pi-hardware.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/usr/local/lib/pi-timelapse
+ExecStart=/usr/bin/python3 -m timelapse --config /etc/pi-timelapse.json capture
+StateDirectory=pi-timelapse
+StateDirectoryMode=0700
+UMask=0077
+Nice=10
+IOSchedulingClass=idle
+TimeoutStartSec=65
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/pi-timelapse /var/lib/pi-hardware

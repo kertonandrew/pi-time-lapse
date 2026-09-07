@@ -1,0 +1,12 @@
+[Unit]
+Description=Capture a timelapse photograph every thirty minutes while powered
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=30min
+AccuracySec=1s
+Persistent=false
+Unit=pi-timelapse-capture.service
+
+[Install]
+WantedBy=timers.target

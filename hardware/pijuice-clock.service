@@ -1,0 +1,9 @@
+[Unit]
+Description=Recover and synchronize the PiJuice RTC
+After=pijuice.service
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/usr/bin/python3 /usr/local/lib/pi-time-lapse/pijuice_clock.py
+TimeoutStartSec=15s
