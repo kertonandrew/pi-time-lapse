@@ -1,0 +1,33 @@
+{
+  "profile_id": "ce06795-supervised-charge-draft-v1",
+  "status": "unqualified_advisory_only",
+  "candidate": {
+    "charge_current_ma": 550,
+    "regulation_voltage_mv": 4100,
+    "termination_current_ma": 50,
+    "temp_cold_c": 10,
+    "temp_cool_c": 15,
+    "temp_warm_c": 30,
+    "temp_hot_c": 35
+  },
+  "verified_battery": {
+    "identity_confirmed": false,
+    "source": null,
+    "max_charge_current_ma": null,
+    "max_charge_voltage_mv": null,
+    "min_charge_temperature_c": null,
+    "max_charge_temperature_c": null,
+    "ntc_r25_ohm": null,
+    "ntc_beta_k": null,
+    "termination_current_compatibility_verified": false,
+    "temperature_calibration_verified": false
+  },
+  "unresolved_before_hardware_application": [
+    "Exact pack permission for at least 605 mA with the 550 mA candidate and charger tolerance",
+    "Exact pack maximum charging voltage and temperature range",
+    "Exact pack termination-current specification including charger tolerance",
+    "Exact pack NTC reference temperature, beta and tolerances",
+    "Independent battery-pouch temperature measurement and sensor-failure handling",
+    "Complete PiJuice custom profile, persistence and charger-reset qualification"
+  ]
+}
