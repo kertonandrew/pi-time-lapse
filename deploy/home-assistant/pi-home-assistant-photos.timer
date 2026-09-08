@@ -1,0 +1,13 @@
+[Unit]
+Description=Refresh Home Assistant after new photos arrive at the archive server
+
+[Timer]
+OnBootSec=1min
+OnUnitInactiveSec=1min
+AccuracySec=10s
+RandomizedDelaySec=5s
+Persistent=false
+Unit=pi-home-assistant-photos.service
+
+[Install]
+WantedBy=timers.target

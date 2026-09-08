@@ -1,0 +1,25 @@
+[Unit]
+Description=Publish a bounded timelapse metrics snapshot to Home Assistant
+After=network.target pi-hardware.service
+ConditionPathExists=/etc/pi-home-assistant/config.json
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/pi-home-assistant
+ExecStart=/opt/pi-home-assistant/.venv/bin/python -m timelapse.ha --config /etc/pi-home-assistant/config.json telemetry
+StateDirectory=pi-home-assistant
+StateDirectoryMode=0700
+UMask=0077
+Nice=10
+IOSchedulingClass=idle
+TimeoutStartSec=40
+KillMode=control-group
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadWritePaths=/var/lib/pi-home-assistant

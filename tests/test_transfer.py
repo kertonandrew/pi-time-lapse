@@ -140,6 +140,250 @@ class ReceiverTests(unittest.TestCase):
         initialized = self.initialize(files=[self.metadata])
         self.assertEqual(initialized["receipts"], [first])
 
+    def latest(self):
+        return json.loads((self.root / "zero-one/latest.json").read_text())
+
+    def test_latest_index_contains_exact_metadata_and_committed_receipt(self):
+        self.stage()
+        receipt = self.commit()["receipt"]
+        self.assertEqual(
+            self.latest(),
+            {
+                "protocol": 1,
+                "device_id": "zero-one",
+                "metadata": self.metadata,
+                "receipt": receipt,
+            },
+        )
+
+    def test_oversized_metadata_rejects_every_upload_action_before_layout_changes(self):
+        oversized = dict(self.metadata, extra="x" * receiver.MAX_INDEX_RECORD_BYTES)
+        requests = {
+            "init": {"protocol": 1, "files": [self.metadata, oversized]},
+            "commit-batch": {"protocol": 1, "files": [self.metadata, oversized]},
+            "commit": {"protocol": 1, "metadata": oversized},
+        }
+        for action, request in requests.items():
+            with (
+                self.subTest(action=action),
+                self.assertRaisesRegex(ValueError, "metadata exceeds its byte limit"),
+            ):
+                receiver.handle_request(action, self.root, "zero-one", request)
+            self.assertFalse(self.root.exists())
+
+    def test_metadata_byte_boundary_keeps_acknowledged_index_readable_after_rejection(
+        self,
+    ):
+        self.metadata["extra"] = "\u26a1"
+        self.metadata["padding"] = ""
+        self.metadata["padding"] = "x" * (
+            receiver.MAX_INDEX_RECORD_BYTES - len(receiver._json_bytes(self.metadata))
+        )
+        self.stage()
+        receipt = self.commit()["receipt"]
+        metadata_path = (
+            self.root
+            / "zero-one/metadata"
+            / f"{Path(self.metadata['filename']).stem}.json"
+        )
+        self.assertEqual(metadata_path.stat().st_size, receiver.MAX_INDEX_RECORD_BYTES)
+        before = {
+            path: path.read_bytes() for path in self.root.rglob("*") if path.is_file()
+        }
+        oversized = dict(self.metadata, padding=self.metadata["padding"] + "x")
+        with self.assertRaisesRegex(ValueError, "metadata exceeds its byte limit"):
+            self.commit(oversized)
+        self.assertEqual(
+            {
+                path: path.read_bytes()
+                for path in self.root.rglob("*")
+                if path.is_file()
+            },
+            before,
+        )
+        self.assertEqual(self.commit()["receipt"], receipt)
+        healthy = self.spool.add("z-healthy.jpg")
+        self.stage(healthy)
+        self.assertEqual(self.commit(healthy)["receipt"], self.latest()["receipt"])
+        self.assertEqual(self.latest()["metadata"], healthy)
+
+    def test_latest_index_rejects_oversized_receipt_below_total_index_limit(self):
+        self.stage()
+        self.commit()
+        index = self.latest()
+        index["receipt"]["extra"] = "x" * receiver.MAX_INDEX_RECORD_BYTES
+        self.assertLess(
+            len(receiver._json_bytes(index)), receiver.MAX_LATEST_INDEX_BYTES
+        )
+        with self.assertRaisesRegex(ValueError, "receipt exceeds its byte limit"):
+            receiver.validate_latest_index(index, "zero-one")
+
+    def test_latest_index_rejects_oversized_empty_record(self):
+        index = {
+            "protocol": 1,
+            "device_id": "zero-one",
+            "metadata": None,
+            "receipt": None,
+            "extra": "x" * receiver.MAX_LATEST_INDEX_BYTES,
+        }
+        with self.assertRaisesRegex(ValueError, "index exceeds its byte limit"):
+            receiver.validate_latest_index(index, "zero-one")
+
+    def test_older_out_of_order_upload_never_regresses_latest_index(self):
+        self.metadata["captured_at_utc"] = "2026-09-07T13:00:00Z"
+        self.stage()
+        self.commit()
+        previous = self.latest()
+        older = self.spool.add("older.jpg")
+        self.stage(older)
+        with patch.object(
+            receiver,
+            "_scan_latest",
+            side_effect=AssertionError("unexpected archive scan"),
+        ):
+            self.commit(older)
+        self.assertEqual(self.latest(), previous)
+
+    def test_missing_legacy_index_bootstrap_preserves_newer_existing_capture(self):
+        self.metadata["captured_at_utc"] = "2026-09-07T13:00:00Z"
+        self.stage()
+        self.commit()
+        previous = self.latest()
+        (self.root / "zero-one/latest.json").unlink()
+        older = self.spool.add("older.jpg")
+        self.stage(older)
+        self.commit(older)
+        self.assertEqual(self.latest(), previous)
+
+    def test_equal_capture_times_choose_lexically_later_filename(self):
+        later = self.spool.add("z.jpg")
+        earlier = self.spool.add("a.jpg")
+        self.stage(later)
+        self.commit(later)
+        self.stage(earlier)
+        self.commit(earlier)
+        self.assertEqual(self.latest()["metadata"]["filename"], "z.jpg")
+
+    def test_failed_latest_index_write_cannot_acknowledge_until_retry(self):
+        self.stage()
+        atomic = receiver._atomic_json
+
+        def fail_index(path, value):
+            if path.name == "latest.json":
+                raise OSError("Index write failed")
+            return atomic(path, value)
+
+        with patch.object(receiver, "_atomic_json", side_effect=fail_index):
+            with self.assertRaisesRegex(OSError, "Index write failed"):
+                self.commit()
+        device = self.root / "zero-one"
+        self.assertTrue((device / "images" / self.metadata["filename"]).exists())
+        self.assertEqual(len(list((device / "receipts").iterdir())), 1)
+        self.assertFalse((device / "latest.json").exists())
+        recovered = self.initialize(files=[self.metadata])["receipts"]
+        self.assertEqual(recovered, [self.latest()["receipt"]])
+
+    def test_index_cross_file_mismatch_prevents_acknowledgement(self):
+        self.stage()
+        self.commit()
+        index = self.latest()
+        index["metadata"]["capture_duration_seconds"] = 999
+        (self.root / "zero-one/latest.json").write_text(json.dumps(index))
+        with self.assertRaisesRegex(ValueError, "does not match committed"):
+            self.commit()
+
+    def test_latest_index_directory_sync_failure_requires_retry_before_ack(self):
+        self.stage()
+        device = self.root / "zero-one"
+        sync = receiver._sync_directory
+
+        def fail_index_sync(path):
+            if path == device:
+                raise OSError("Index directory sync failed")
+            return sync(path)
+
+        with patch.object(receiver, "_sync_directory", side_effect=fail_index_sync):
+            with self.assertRaisesRegex(OSError, "Index directory sync failed"):
+                self.commit()
+        self.assertTrue((device / "latest.json").exists())
+        with patch.object(receiver, "_sync_directory", wraps=sync) as synchronized:
+            recovered = self.commit()["receipt"]
+        self.assertEqual(recovered, self.latest()["receipt"])
+        self.assertTrue(
+            any(
+                arguments.args == (device,) for arguments in synchronized.call_args_list
+            )
+        )
+
+    def test_bootstrap_limit_failure_retains_photos_without_acknowledgement(self):
+        self.stage()
+        self.commit()
+        (self.root / "zero-one/latest.json").unlink()
+        other = self.spool.add("other.jpg")
+        self.stage(other)
+        with patch.object(receiver, "MAX_REINDEX_ENTRIES", 1):
+            with self.assertRaisesRegex(ValueError, "exceeded max_entries"):
+                self.commit(other)
+        self.assertFalse((self.root / "zero-one/latest.json").exists())
+        result = receiver.handle_request(
+            "reindex", self.root, "zero-one", {"protocol": 1, "max_entries": 2}
+        )
+        self.assertEqual(result["indexed_entries"], 2)
+        self.assertEqual(result["latest_filename"], "other.jpg")
+
+    def test_reindex_rebuilds_legacy_or_corrupt_index_with_strict_request_limits(self):
+        for maximum in (0, True, 1.5, float("inf"), "10", 1000001):
+            with self.subTest(maximum=maximum), self.assertRaises(ValueError):
+                receiver.handle_request(
+                    "reindex",
+                    self.root,
+                    "zero-one",
+                    {"protocol": 1, "max_entries": maximum},
+                )
+        self.stage()
+        receipt = self.commit()["receipt"]
+        (self.root / "zero-one/latest.json").write_text("corrupt")
+        result = receiver.handle_request(
+            "reindex", self.root, "zero-one", {"protocol": 1}
+        )
+        self.assertEqual(result["latest_filename"], self.metadata["filename"])
+        self.assertEqual(self.latest()["receipt"], receipt)
+
+    def test_reindex_rejects_corrupt_or_oversized_committed_records_without_replacing_index(
+        self,
+    ):
+        self.stage()
+        self.commit()
+        original = self.latest()
+        path = (
+            self.root
+            / "zero-one/receipts"
+            / f"{Path(self.metadata['filename']).stem}.json"
+        )
+        bad = dict(original["receipt"], device_id="wrong-device")
+        for content in (json.dumps(bad), " " * (receiver.MAX_INDEX_RECORD_BYTES + 1)):
+            path.write_text(content)
+            with self.assertRaises(ValueError):
+                receiver.handle_request(
+                    "reindex", self.root, "zero-one", {"protocol": 1}
+                )
+            self.assertEqual(self.latest(), original)
+
+    def test_reindex_empty_archive_index_is_replaced_by_first_commit(self):
+        result = receiver.handle_request(
+            "reindex", self.root, "zero-one", {"protocol": 1}
+        )
+        self.assertIsNone(result["latest_filename"])
+        self.assertIsNone(self.latest()["metadata"])
+        self.stage()
+        with patch.object(
+            receiver,
+            "_scan_latest",
+            side_effect=AssertionError("unexpected archive scan"),
+        ):
+            self.commit()
+        self.assertEqual(self.latest()["metadata"], self.metadata)
+
     def test_receipt_write_failure_recovers_after_image_publication(self):
         self.stage()
         original = receiver._atomic_json

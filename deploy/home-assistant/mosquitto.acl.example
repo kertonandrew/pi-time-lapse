@@ -1,0 +1,15 @@
+user timelapse-zero-01
+ topic write homeassistant/device/timelapse-zero-01/config
+ topic write pi_timelapse/timelapse-zero-01/state
+ topic write pi_timelapse/timelapse-zero-01/connection/telemetry
+
+user timelapse-archive
+ topic write homeassistant/device/timelapse-zero-01/config
+ topic write pi_timelapse/timelapse-zero-01/image
+ topic write pi_timelapse/timelapse-zero-01/image_metadata
+ topic write pi_timelapse/timelapse-zero-01/connection/photos
+
+user homeassistant
+ topic read homeassistant/#
+ topic read pi_timelapse/#
+ topic write homeassistant/status

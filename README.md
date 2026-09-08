@@ -11,9 +11,12 @@ deferred.
 - [Solar transfer policy and measurement limits](docs/solar-transfer-design.md)
 - [Hardware setup](hardware/README.md)
 - [Power instrumentation and battery requirements](hardware/power-measurement-plan.md)
+- [Home Assistant metrics and camera integration](docs/home-assistant.md)
 
 The application uses Python's standard library, the installed `rpicam-still`, and
 rsync/OpenSSH. It does not change charging settings or shut down the Pi.
+The optional Home Assistant publishers add `paho-mqtt`, with short telemetry
+sessions on the Pi and cached camera images published from the archive server.
 
 ```sh
 python3 -m timelapse capture --dry-run

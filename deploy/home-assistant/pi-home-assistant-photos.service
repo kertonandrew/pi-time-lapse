@@ -1,0 +1,27 @@
+[Unit]
+Description=Publish the latest archived timelapse JPEG to Home Assistant
+After=network.target
+ConditionPathExists=/etc/pi-home-assistant/config.json
+
+[Service]
+Type=oneshot
+User=timelapse
+Group=timelapse
+WorkingDirectory=/opt/pi-home-assistant
+ExecStart=/opt/pi-home-assistant/.venv/bin/python -m timelapse.ha --config /etc/pi-home-assistant/config.json photos
+StateDirectory=pi-home-assistant
+StateDirectoryMode=0700
+UMask=0077
+Nice=10
+IOSchedulingClass=idle
+TimeoutStartSec=90
+KillMode=control-group
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadWritePaths=/var/lib/pi-home-assistant
