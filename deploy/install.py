@@ -1,7 +1,9 @@
 import argparse
 import ast
 import base64
+from contextlib import contextmanager
 from datetime import datetime, timezone
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -41,6 +43,8 @@ UNITS = (*SERVICES, *TIMERS)
 CONFIG = "/etc/pi-timelapse.json"
 PACKAGE_ROOT = "/usr/local/lib/pi-timelapse/timelapse"
 BACKUP_ROOT = "/var/backups/pi-timelapse"
+LOCK_PATH = "/run/pi-timelapse-deploy.lock"
+INCOMPLETE_STATUSES = {"prepared", "recovering"}
 ALLOWED_PATHS = {
     CONFIG,
     *(f"{PACKAGE_ROOT}/{name}" for name in PACKAGE_FILES),
@@ -153,6 +157,74 @@ class Installer:
                 f"Command failed ({code}): {' '.join(arguments)}: {error}"
             )
         return output
+
+    @contextmanager
+    def deployment_lock(self):
+        self.check_parent_directories(LOCK_PATH)
+        path = self.path(LOCK_PATH)
+        make_directory(path.parent)
+        descriptor = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        try:
+            details = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(details.st_mode)
+                or details.st_nlink != 1
+                or details.st_uid != self.owner[0]
+            ):
+                raise InstallError("Deployment lock must be an owned regular file")
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as error:
+                raise InstallError(
+                    "Another deployment or recovery is running"
+                ) from error
+            os.fchmod(descriptor, 0o600)
+            yield
+        finally:
+            os.close(descriptor)
+
+    def health_check(self):
+        """Import installed modules and validate configuration without running device jobs."""
+        modules = [
+            f"timelapse.{Path(name).stem}"
+            for name in PACKAGE_FILES
+            if name not in {"__init__.py", "__main__.py"}
+        ]
+        script = "\n".join(
+            (
+                "import importlib, json, sys",
+                "from pathlib import Path",
+                "sys.path.insert(0, sys.argv[1])",
+                "for name in json.loads(sys.argv[3]):",
+                "    importlib.import_module(name)",
+                "from timelapse.config import load_config",
+                "load_config(Path(sys.argv[2]))",
+            )
+        )
+        code, _, error = self.run(
+            [
+                sys.executable,
+                "-I",
+                "-B",
+                "-c",
+                script,
+                str(self.path(PACKAGE_ROOT).parent),
+                str(self.path(CONFIG)),
+                json.dumps(modules),
+            ]
+        )
+        if code:
+            raise InstallError(f"Installed application health check failed: {error}")
+
+    def incomplete_snapshots(self):
+        result = []
+        self.check_parent_directories(f"{BACKUP_ROOT}/manifest.json")
+        for manifest_path in sorted(self.path(BACKUP_ROOT).glob("*/manifest.json")):
+            backup = manifest_path.parent
+            manifest = self.load_manifest(backup)
+            if manifest.get("status") in INCOMPLETE_STATUSES:
+                result.append(backup)
+        return result
 
     def preflight(self, apply=False):
         if apply and os.geteuid() != 0:
@@ -329,9 +401,23 @@ class Installer:
                 self.checked(["systemctl", "stop", unit])
 
     def apply(self, changes, states):
-        if not changes:
-            return None
+        with self.deployment_lock():
+            return self._apply(changes, states)
+
+    def _apply(self, changes, states):
+        pending = self.incomplete_snapshots()
+        if pending:
+            raise InstallError(
+                f"An interrupted deployment requires --recover first: {pending[0]}"
+            )
         self.validate_manifest({"version": 1, "files": changes, "units": states})
+        if self.states() != states:
+            raise InstallError(
+                "Unit state changed after planning; prepare the deployment again"
+            )
+        if not changes:
+            self.health_check()
+            return None
         for name, change in changes.items():
             if file_state(self.path(name)) != change["before"]:
                 raise InstallError(f"File changed after planning: {name}")
@@ -358,12 +444,13 @@ class Installer:
                     raise InstallError(f"File changed after planning: {name}")
                 write_state(self.path(name), change["after"])
             self.checked(["systemctl", "daemon-reload"])
+            self.health_check()
             self.restore_timers(states["timers"])
             manifest["status"] = "applied"
             self.save_manifest(backup, manifest)
         except Exception as error:
             try:
-                self.rollback(backup, apply=True)
+                self._rollback(backup, apply=True)
             except Exception as recovery_error:
                 raise InstallError(
                     f"Installation failed ({error}); rollback failed ({recovery_error}); snapshot: {backup}"
@@ -421,18 +508,43 @@ class Installer:
                 raise InstallError("Snapshot contains invalid timer states")
         return manifest
 
-    def rollback(self, backup, apply=False):
+    def load_manifest(self, backup):
         backup = Path(backup)
         if backup.is_symlink() or (backup / "manifest.json").is_symlink():
             raise InstallError("Snapshot must not be a symlink")
-        manifest = self.validate_manifest(
+        return self.validate_manifest(
             json.loads((backup / "manifest.json").read_text())
         )
+
+    def rollback(self, backup, apply=False):
+        if not apply:
+            return self._rollback(backup)
+        with self.deployment_lock():
+            return self._rollback(backup, apply=True)
+
+    def recover(self, backup, apply=False):
+        """Restore an interrupted deployment snapshot while preserving later file edits."""
+        if not apply:
+            return self._recover(backup)
+        with self.deployment_lock():
+            return self._recover(backup, apply=True)
+
+    def _recover(self, backup, apply=False):
+        manifest = self.load_manifest(backup)
+        if manifest.get("status") not in INCOMPLETE_STATUSES:
+            raise InstallError("Recovery requires an interrupted deployment snapshot")
+        return self._rollback(backup, apply=apply)
+
+    def _rollback(self, backup, apply=False):
+        backup = Path(backup)
+        manifest = self.load_manifest(backup)
         for name, change in manifest["files"].items():
             if file_state(self.path(name)) not in (change["before"], change["after"]):
                 raise InstallError(f"Rollback would overwrite a later change: {name}")
         if not apply:
             return manifest
+        manifest["status"] = "recovering"
+        self.save_manifest(backup, manifest)
         self.stop_units()
         for unit, target in manifest["units"]["timers"].items():
             if (
@@ -446,6 +558,13 @@ class Installer:
                 raise InstallError(f"Rollback would overwrite a later change: {name}")
             write_state(self.path(name), change["before"])
         self.checked(["systemctl", "daemon-reload"])
+        if any(
+            state["active"] in ACTIVE_STATES
+            for state in manifest["units"]["timers"].values()
+        ) or all(
+            self.path(f"{PACKAGE_ROOT}/{name}").is_file() for name in PACKAGE_FILES
+        ):
+            self.health_check()
         self.restore_timers(manifest["units"]["timers"])
         manifest["status"] = "rolled-back"
         self.save_manifest(backup, manifest)
@@ -461,17 +580,27 @@ def main(argv=None):
         action="store_true",
         help="Apply the operation; omitted means dry-run",
     )
-    parser.add_argument("--rollback", type=Path, metavar="BACKUP_DIRECTORY")
+    operations = parser.add_mutually_exclusive_group()
+    operations.add_argument("--rollback", type=Path, metavar="BACKUP_DIRECTORY")
+    operations.add_argument(
+        "--recover",
+        type=Path,
+        metavar="BACKUP_DIRECTORY",
+        help="Restore an interrupted prepared or recovering snapshot",
+    )
     arguments = parser.parse_args(argv)
     installer = Installer()
     try:
         installer.preflight(apply=arguments.apply)
-        if arguments.rollback:
-            manifest = installer.rollback(arguments.rollback)
+        if arguments.rollback or arguments.recover:
+            backup = arguments.rollback or arguments.recover
+            operation = "recover" if arguments.recover else "rollback"
+            restore = installer.recover if arguments.recover else installer.rollback
+            manifest = restore(backup)
             print(
                 json.dumps(
                     {
-                        "operation": "rollback",
+                        "operation": operation,
                         "files": list(manifest["files"]),
                         "timers": manifest["units"]["timers"],
                     },
@@ -479,7 +608,7 @@ def main(argv=None):
                 )
             )
             if arguments.apply:
-                installer.rollback(arguments.rollback, apply=True)
+                restore(backup, apply=True)
         else:
             changes, states = installer.plan(), installer.states()
             print(

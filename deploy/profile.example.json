@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "device_id": "garden-camera",
+  "ssh": {
+    "host": "camera.example.com",
+    "user": "camera",
+    "port": 22,
+    "host_key_alias": null,
+    "identity_file": null,
+    "known_hosts_file": null
+  },
+  "remote": {
+    "staging_dir": "/var/lib/pi-timelapse-deploy",
+    "python": "/usr/bin/python3",
+    "min_free_mb": 128
+  },
+  "files": {
+    "camera": "camera.json",
+    "home_assistant": "home-assistant.json",
+    "hardware_env": "hardware.env"
+  }
+}

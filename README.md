@@ -17,14 +17,15 @@ Python 3.11 or newer is required. From a checkout:
 ```sh
 python3 -m venv .venv
 .venv/bin/python -m pip install '.[homeassistant]'
-.venv/bin/python -m timelapse.setup init --directory local --device-id garden-camera --broker mqtt.example.com
-.venv/bin/python -m timelapse --config local/camera.json capture --dry-run
-.venv/bin/python -m timelapse.setup doctor --config local/camera.json --ha-config local/home-assistant.json
+.venv/bin/python deploy/manage.py init --host camera.example.com --user camera --device-id garden-camera --broker mqtt.example.com
+.venv/bin/python -m timelapse --config local/deployment/camera.json capture --dry-run
+.venv/bin/python -m timelapse.setup doctor --config local/deployment/camera.json --ha-config local/deployment/home-assistant.json
 ```
 
-Replace the example device ID and broker with your own. `init` creates complete,
-validated configuration files with private permissions and refuses to overwrite
-existing files. `local/` is Git-ignored. Keep real configuration, keys, certificates,
+Replace the example host, SSH user, device ID and broker with your own. `init` creates
+the private deployment profile and validated configuration templates in
+`local/deployment/` and refuses to overwrite existing files. `local/` is Git-ignored.
+Keep real configuration, keys, certificates,
 database files and photographs outside tracked files. See [SECURITY.md](SECURITY.md).
 
 The dry run and doctor work without contacting hardware or the network. On a
@@ -39,6 +40,12 @@ No user account, network address, battery qualification or archive destination i
 assumed. Unknown configuration keys and invalid values fail validation.
 
 ## Deploy and commission
+
+For repeatable home deployment, use the [SSH deployment workflow](docs/deployment.md):
+a private device profile, verified application bundle, remote preview, health checks
+and rollback. `python3 deploy/manage.py validate` checks `local/deployment/profile.json`;
+`python3 deploy/manage.py status` reads the configured device. CI builds the same
+configuration-free archive used by the operator workflow.
 
 1. Install Raspberry Pi OS Lite, enable the camera/I2C as required and verify
    `rpicam-still`. Set up the [hardware recorder](hardware/README.md) for the

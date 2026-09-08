@@ -3,6 +3,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import shutil
 import stat
 import tempfile
 import unittest
@@ -24,12 +25,21 @@ class FakeSystemd:
         self.enabled = {}
         self.active = {}
         self.reload_failure = False
+        self.real_health_check = False
+        self.health_failure = False
 
     def unit_exists(self, name):
         return (self.root / "etc/systemd/system" / name).is_file()
 
     def run(self, arguments):
         self.commands.append(arguments)
+        if arguments[0] == installer.sys.executable:
+            if self.health_failure:
+                self.health_failure = False
+                return 1, "", "Simulated unhealthy installation"
+            if self.real_health_check:
+                return installer.command(arguments)
+            return 0, "", ""
         action = arguments[1]
         names = [name for name in arguments[2:] if not name.startswith("--")]
         if action == "is-active":
@@ -91,6 +101,12 @@ class DeploymentTests(unittest.TestCase):
 
     def install(self):
         return self.deployer.apply(self.deployer.plan(), self.deployer.states())
+
+    def use_real_package(self):
+        package = Path(__file__).resolve().parents[1] / "timelapse"
+        for name in installer.PACKAGE_FILES:
+            shutil.copy2(package / name, self.source / "timelapse" / name)
+        self.systemd.real_health_check = True
 
     def test_preflight_accepts_supported_os_and_arm_pi_combinations(self):
         self.write_target("/proc/device-tree/model", b"Raspberry Pi Zero W Rev 1.1\0")
@@ -286,6 +302,226 @@ class DeploymentTests(unittest.TestCase):
         )
         self.assertEqual(len(manifests), 1)
         self.assertEqual(json.loads(manifests[0].read_text())["status"], "rolled-back")
+
+    def test_health_check_uses_installed_package_without_creating_state_or_bytecode(
+        self,
+    ):
+        self.use_real_package()
+        self.install()
+        (self.source / "timelapse/capture.py").write_text(
+            "raise RuntimeError('source')"
+        )
+        self.deployer.health_check()
+        self.assertFalse(self.deployer.path("/var/lib/pi-timelapse").exists())
+        self.assertEqual(list(self.root.rglob("__pycache__")), [])
+
+    def test_installed_import_failure_rolls_back_before_restarting_timers(self):
+        self.use_real_package()
+        self.install()
+        original = self.deployer.path(
+            installer.PACKAGE_ROOT + "/capture.py"
+        ).read_bytes()
+        timer = installer.TIMERS[0]
+        self.systemd.enabled[timer] = "enabled"
+        self.systemd.active[timer] = "active"
+        (self.source / "timelapse/capture.py").write_text(
+            "raise RuntimeError('candidate import failed')\n"
+        )
+        self.systemd.commands.clear()
+        with self.assertRaisesRegex(installer.InstallError, "snapshot was restored"):
+            self.install()
+        self.assertEqual(
+            self.deployer.path(installer.PACKAGE_ROOT + "/capture.py").read_bytes(),
+            original,
+        )
+        checks = [
+            index
+            for index, arguments in enumerate(self.systemd.commands)
+            if arguments[0] == installer.sys.executable
+        ]
+        starts = [
+            index
+            for index, arguments in enumerate(self.systemd.commands)
+            if arguments[:2] == ["systemctl", "start"]
+        ]
+        self.assertEqual(len(checks), 2)
+        self.assertTrue(starts)
+        self.assertLess(max(checks), min(starts))
+        self.assertEqual(self.systemd.active[timer], "active")
+
+    def test_health_check_rejects_invalid_preserved_configuration(self):
+        self.use_real_package()
+        self.install()
+        configuration = self.deployer.path(installer.CONFIG)
+        configuration.write_text('{"schedule": {"interval_seconds": 1}}\n')
+        before = configuration.read_bytes()
+        with self.assertRaisesRegex(installer.InstallError, "health check failed"):
+            self.deployer.health_check()
+        self.assertEqual(configuration.read_bytes(), before)
+
+    def test_unchanged_install_still_checks_installed_health(self):
+        self.install()
+        self.systemd.health_failure = True
+        with self.assertRaisesRegex(installer.InstallError, "health check failed"):
+            self.install()
+
+    def test_failed_configuration_update_restores_previous_private_configuration(self):
+        self.use_real_package()
+        self.install()
+        configuration = self.deployer.path(installer.CONFIG)
+        original = installer.file_state(configuration)
+        changes = {
+            installer.CONFIG: {
+                "before": original,
+                "after": installer.regular_file(
+                    b'{"schedule": {"interval_seconds": 1}}\n',
+                    mode=0o600,
+                    owner=(os.getuid(), os.getgid()),
+                ),
+            }
+        }
+        with self.assertRaisesRegex(installer.InstallError, "snapshot was restored"):
+            self.deployer.apply(changes, self.deployer.states())
+        self.assertEqual(installer.file_state(configuration), original)
+
+    def test_failed_rollback_health_keeps_timers_stopped_for_recovery(self):
+        self.use_real_package()
+        self.install()
+        timer = installer.TIMERS[0]
+        self.systemd.enabled[timer] = "enabled"
+        self.systemd.active[timer] = "active"
+        original = self.deployer.path(installer.CONFIG).read_bytes()
+        self.deployer.path(installer.CONFIG).write_text(
+            '{"schedule": {"interval_seconds": 1}}\n'
+        )
+        source = self.source / "timelapse/capture.py"
+        source.write_bytes(source.read_bytes() + b"\n")
+        with self.assertRaisesRegex(installer.InstallError, "rollback failed"):
+            self.install()
+        self.assertEqual(self.systemd.active[timer], "inactive")
+        snapshots = self.deployer.incomplete_snapshots()
+        self.assertEqual(len(snapshots), 1)
+        self.deployer.path(installer.CONFIG).write_bytes(original)
+        self.deployer.recover(snapshots[0], apply=True)
+        self.assertEqual(self.systemd.active[timer], "active")
+
+    def test_timer_state_change_after_planning_is_rejected_without_installation(self):
+        self.install()
+        (self.source / "timelapse/capture.py").write_text("value = 2\n")
+        changes, states = self.deployer.plan(), self.deployer.states()
+        timer = installer.TIMERS[0]
+        self.systemd.enabled[timer] = "enabled"
+        self.systemd.active[timer] = "active"
+        self.systemd.commands.clear()
+        with self.assertRaisesRegex(installer.InstallError, "Unit state changed"):
+            self.deployer.apply(changes, states)
+        self.assertEqual(
+            self.deployer.path(installer.PACKAGE_ROOT + "/capture.py").read_text(),
+            "value = 1\n",
+        )
+        self.assertTrue(
+            all(
+                arguments[1] in {"is-active", "is-enabled"}
+                for arguments in self.systemd.commands
+            )
+        )
+        self.assertEqual(self.systemd.active[timer], "active")
+
+    def test_deployment_lock_excludes_other_install_and_rollback(self):
+        backup = self.install()
+        changes, states = self.deployer.plan(), self.deployer.states()
+        with self.deployer.deployment_lock():
+            for operation in (
+                lambda: self.deployer.apply(changes, states),
+                lambda: self.deployer.rollback(backup, apply=True),
+            ):
+                with self.assertRaisesRegex(
+                    installer.InstallError, "Another deployment"
+                ):
+                    operation()
+        self.assertIsNone(self.deployer.apply(changes, states))
+        self.assertEqual(
+            stat.S_IMODE(self.deployer.path(installer.LOCK_PATH).stat().st_mode), 0o600
+        )
+
+    def test_symlinked_deployment_lock_is_rejected_without_modifications(self):
+        sentinel = self.base / "sentinel"
+        sentinel.write_text("keep")
+        lock = self.deployer.path(installer.LOCK_PATH)
+        lock.parent.mkdir(parents=True)
+        lock.symlink_to(sentinel)
+        with self.assertRaises(OSError):
+            self.install()
+        self.assertEqual(sentinel.read_text(), "keep")
+        self.assertFalse(self.deployer.path(installer.CONFIG).exists())
+
+    def interrupted_update(self):
+        self.install()
+        timer = installer.TIMERS[0]
+        self.systemd.enabled[timer] = "enabled"
+        self.systemd.active[timer] = "active"
+        for name in ("capture.py", "transfer.py"):
+            (self.source / "timelapse" / name).write_text("value = 2\n")
+        write_state = installer.write_state
+
+        def interrupted_write(path, state):
+            write_state(path, state)
+            if path == self.deployer.path(installer.PACKAGE_ROOT + "/capture.py"):
+                raise KeyboardInterrupt("Interrupted deployment")
+
+        with patch.object(installer, "write_state", side_effect=interrupted_write):
+            with self.assertRaises(KeyboardInterrupt):
+                self.install()
+        snapshots = self.deployer.incomplete_snapshots()
+        self.assertEqual(len(snapshots), 1)
+        return snapshots[0]
+
+    def test_interrupted_install_requires_explicit_recovery_before_more_updates(self):
+        backup = self.interrupted_update()
+        installed = self.deployer.path(installer.PACKAGE_ROOT + "/capture.py")
+        self.assertEqual(installed.read_text(), "value = 2\n")
+        commands = len(self.systemd.commands)
+        self.deployer.recover(backup)
+        self.assertEqual(len(self.systemd.commands), commands)
+        self.assertEqual(installed.read_text(), "value = 2\n")
+        with self.assertRaisesRegex(installer.InstallError, "requires --recover"):
+            self.install()
+        self.deployer.recover(backup, apply=True)
+        self.assertEqual(installed.read_text(), "value = 1\n")
+        self.assertEqual(self.systemd.active[installer.TIMERS[0]], "active")
+        self.assertEqual(self.deployer.incomplete_snapshots(), [])
+        self.assertEqual(
+            json.loads((backup / "manifest.json").read_text())["status"], "rolled-back"
+        )
+
+    def test_interrupted_recovery_can_be_retried(self):
+        backup = self.interrupted_update()
+        write_state = installer.write_state
+
+        def failed_write(path, state):
+            if path == self.deployer.path(installer.PACKAGE_ROOT + "/capture.py"):
+                raise OSError("Storage temporarily unavailable")
+            write_state(path, state)
+
+        with patch.object(installer, "write_state", side_effect=failed_write):
+            with self.assertRaisesRegex(OSError, "Storage temporarily unavailable"):
+                self.deployer.recover(backup, apply=True)
+        self.assertEqual(
+            json.loads((backup / "manifest.json").read_text())["status"], "recovering"
+        )
+        self.deployer.recover(backup, apply=True)
+        self.assertEqual(self.deployer.incomplete_snapshots(), [])
+
+    def test_recovery_refuses_completed_snapshot_and_later_user_edits(self):
+        backup = self.install()
+        with self.assertRaisesRegex(installer.InstallError, "interrupted deployment"):
+            self.deployer.recover(backup, apply=True)
+        backup = self.interrupted_update()
+        installed = self.deployer.path(installer.PACKAGE_ROOT + "/capture.py")
+        installed.write_text("user_change = True\n")
+        with self.assertRaisesRegex(installer.InstallError, "later change"):
+            self.deployer.recover(backup, apply=True)
+        self.assertEqual(installed.read_text(), "user_change = True\n")
 
     def test_snapshot_rejects_unmanaged_paths_and_units_without_modifications(self):
         backup = self.install()
