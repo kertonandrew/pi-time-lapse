@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.13"]
+    steps:
+      - name: Check out repository with checkout v7.0.1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Configure Python with setup-python v7.0.0
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Check public repository contents
+        run: python ops/check_public_repo.py
+      - name: Install pinned uv
+        run: python -m pip install uv==0.12.10
+      - name: Install locked dependencies
+        run: uv sync --locked --extra homeassistant --python ${{ matrix.python }}
+      - name: Run application tests
+        run: uv run --no-sync python -m unittest discover -s tests -v
+      - name: Run hardware unit tests
+        run: uv run --no-sync python -m unittest discover -s hardware -p 'test_*.py' -v
+      - name: Check CLI import and packaging
+        run: |
+          uv run --no-sync python -m timelapse --help
+          uv build --no-sources

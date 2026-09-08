@@ -13,9 +13,18 @@ import sys
 import time
 
 from .ha_config import load_config
+from .config import load_config as load_timelapse_config
+from .ha_controls import (
+    FIELDS,
+    apply_desired,
+    decode_desired,
+    effective_settings,
+    encode_reported,
+    session_lock,
+)
 from .ha_discovery import build_discovery, topics
 from .ha_metrics import read_metrics
-from .ha_mqtt import publish_messages
+from .ha_mqtt import publish_messages, receive_messages
 from .ha_photos import latest_photo
 from .spool import atomic_json, read_json
 
@@ -201,6 +210,88 @@ def run(config, role, dry_run=False, force=False, now=None):
     }
 
 
+def run_controls(config, dry_run=False):
+    """Poll desired configuration and report only validated durable local readback."""
+    deadline = time.monotonic() + config["mqtt"]["timeout_seconds"]
+    local = load_timelapse_config(config["controls"]["timelapse_config"])
+    if local["remote_controls"]["enabled"] is not True:
+        return {
+            "action": "wait",
+            "reason": "Remote camera controls are locally disabled",
+        }
+    if local["remote_controls"]["device_id"] != config["device_id"]:
+        raise ValueError("Camera control device identities differ")
+    current = effective_settings(local)
+    destinations = topics(
+        config["device_id"], config["topic_prefix"], config["discovery_prefix"]
+    )
+    desired_topics = {f"{destinations['desired']}/{field}": field for field in FIELDS}
+    if dry_run:
+        return {
+            "action": "preview",
+            "role": "controls",
+            "mqtt_writes": False,
+            "configuration_writes": False,
+            "settings": current,
+            "desired_topics": list(desired_topics),
+        }
+    if not config["mqtt"]["host"]:
+        raise ValueError("Set mqtt.host before polling camera controls")
+    observed = telemetry_sample(config)
+    if not telemetry_allowed(
+        observed, config["telemetry"]["minimum_battery_voltage_mv"]
+    ):
+        return {
+            "action": "wait",
+            "reason": "Battery reserve or external input is insufficient",
+        }
+
+    def mqtt_budget():
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise RuntimeError("Camera controls exceeded the operation deadline")
+        return dict(config["mqtt"], timeout_seconds=remaining)
+
+    with session_lock(local, config["device_id"]):
+        messages = receive_messages(
+            mqtt_budget(),
+            list(desired_topics),
+            client_id=f"ptl-{config['device_id']}-controls-read",
+            connection_topic=f"{destinations['connection']}/controls",
+            poll_seconds=config["controls"]["poll_seconds"],
+        )
+        updates = {}
+        for topic, payload in messages:
+            if topic not in desired_topics:
+                raise ValueError(
+                    "MQTT control topic is outside this device's allowlist"
+                )
+            field = desired_topics[topic]
+            updates[field] = decode_desired(field, payload)
+        mqtt_budget()
+        persisted = apply_desired(local, config["device_id"], updates)
+        reported = encode_reported(persisted)
+        discovery_topic, document = discovery(config)
+        outgoing = [(discovery_topic, json_bytes(document), True)] + [
+            (f"{destinations['reported']}/{field}", reported[field], True)
+            for field in FIELDS
+        ]
+        publish_messages(
+            mqtt_budget(),
+            outgoing,
+            client_id=f"ptl-{config['device_id']}-controls-report",
+            connection_topic=f"{destinations['connection']}/controls",
+        )
+    return {
+        "action": "reported",
+        "role": "controls",
+        "settings": persisted,
+        "changed_fields": [
+            field for field in FIELDS if persisted[field] != current[field]
+        ],
+    }
+
+
 def remove(config, role):
     if not config["mqtt"]["host"]:
         raise ValueError("Set mqtt.host before removing discovery")
@@ -251,6 +342,8 @@ def main(argv=None):
         subparser = commands.add_parser(role)
         subparser.add_argument("--dry-run", action="store_true")
         subparser.add_argument("--force", action="store_true")
+    controls = commands.add_parser("controls")
+    controls.add_argument("--dry-run", action="store_true")
     removal = commands.add_parser("remove")
     removal.add_argument("--role", choices=("telemetry", "photos"), required=True)
     removal.add_argument("--apply", action="store_true", required=True)
@@ -265,6 +358,8 @@ def main(argv=None):
             result = remove(config, args.role)
         elif args.command == "register":
             result = register(config, args.role)
+        elif args.command == "controls":
+            result = run_controls(config, args.dry_run)
         else:
             result = run(config, args.command, args.dry_run, args.force)
         print(json.dumps(result, sort_keys=True, allow_nan=False))

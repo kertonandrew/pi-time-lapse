@@ -36,6 +36,10 @@ DEFAULTS = {
         "max_bytes": 8388608,
         "republish_seconds": 3600,
     },
+    "controls": {
+        "timelapse_config": "/etc/pi-timelapse.json",
+        "poll_seconds": 3,
+    },
 }
 IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}\Z")
 PREFIX = re.compile(r"[A-Za-z0-9_-]+(?:/[A-Za-z0-9_-]+)*\Z")
@@ -138,6 +142,11 @@ def validate_config(changes):
     _path(photos["archive_root"], "photos.archive_root")
     _integer(photos["max_bytes"], "photos.max_bytes", 4, 33554432)
     _integer(photos["republish_seconds"], "photos.republish_seconds", 300, 86400)
+    controls = config["controls"]
+    _path(controls["timelapse_config"], "controls.timelapse_config")
+    _integer(controls["poll_seconds"], "controls.poll_seconds", 1, 10)
+    if controls["poll_seconds"] >= mqtt["timeout_seconds"]:
+        raise ValueError("Control polling window must be shorter than MQTT timeout")
     return config
 
 

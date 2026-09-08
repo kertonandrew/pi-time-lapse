@@ -74,9 +74,10 @@ def capture(
     camera_command: str = "rpicam-still",
     timeout_seconds: float = 45,
     settle_ms: int = 1000,
-    width: int = 4608,
-    height: int = 2592,
-    rotation: int = 180,
+    width: int = 0,
+    height: int = 0,
+    rotation: int = 0,
+    quality: int = 90,
     time_source: str = "UNSYNC",
     cancelled=None,
     lock_timeout_seconds=None,
@@ -93,7 +94,14 @@ def capture(
         or not 0 < timeout_seconds <= 3600
     ):
         raise ValueError("timeout_seconds must be between 0 and 3600")
-    for name, value in (("width", width), ("height", height), ("settle_ms", settle_ms)):
+    for name, value in (("width", width), ("height", height)):
+        if type(value) is not int or not 0 <= value <= 16384:
+            raise ValueError(f"{name} must be an integer in 0..16384")
+    if bool(width) != bool(height):
+        raise ValueError("Set both dimensions or use native resolution")
+    if type(quality) is not int or not 1 <= quality <= 100:
+        raise ValueError("quality must be an integer in 1..100")
+    for name, value in (("settle_ms", settle_ms),):
         if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
             raise ValueError(f"{name} must be a positive integer")
     if rotation not in (0, 180):
@@ -122,17 +130,17 @@ def capture(
                 "--nopreview",
                 "--timeout",
                 str(settle_ms),
-                "--width",
-                str(width),
-                "--height",
-                str(height),
                 "--rotation",
                 str(rotation),
+                "--quality",
+                str(quality),
                 "--encoding",
                 "jpg",
                 "--output",
                 str(temporary),
             ]
+            if width:
+                command.extend(["--width", str(width), "--height", str(height)])
             with tempfile.TemporaryFile() as errors:
                 try:
                     if cancelled is None:

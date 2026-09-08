@@ -7,7 +7,7 @@ import tempfile
 import time
 from pathlib import Path
 
-from .config import load_config
+from .config import effective_config, load_config
 from .power import (
     PowerError,
     PowerHistory,
@@ -163,40 +163,58 @@ def main(argv=None):
     )
     parser.add_argument("--config", type=Path)
     commands = parser.add_subparsers(dest="command", required=True)
-    for command in ("capture", "probe", "upload", "status"):
+    for command in ("capture", "scheduled-capture", "probe", "upload", "status"):
         subparser = commands.add_parser(command)
-        if command in ("capture", "upload"):
+        if command in ("capture", "scheduled-capture", "upload"):
             subparser.add_argument("--dry-run", action="store_true")
     arguments = parser.parse_args(argv)
     os.umask(0o077)
     try:
         config = load_config(arguments.config)
-        if arguments.command == "capture" and arguments.dry_run:
+        if arguments.command in ("capture", "scheduled-capture"):
+            config = effective_config(config)
+        if arguments.command in ("capture", "scheduled-capture") and arguments.dry_run:
             emit(
                 {
                     "action": "capture",
                     "camera": config["camera"],
+                    "schedule": config["schedule"],
                     "spool": config["spool"],
                     "power_check": True,
                     "shutdown": False,
                 }
             )
             return 0
+        if (
+            arguments.command == "scheduled-capture"
+            and not config["schedule"]["enabled"]
+        ):
+            emit({"action": "wait", "reason": "Scheduled capture is disabled"})
+            return 0
         from .spool import Spool
 
         spool = Spool(
             Path(config["spool"]), config["max_spool_bytes"], config["min_free_bytes"]
         )
-        history = PowerHistory(Path(config["spool"]) / "power-history.sqlite3")
-        if arguments.command == "capture":
+        if arguments.command not in ("capture", "scheduled-capture"):
+            history = PowerHistory(Path(config["spool"]) / "power-history.sqlite3")
+        if arguments.command in ("capture", "scheduled-capture"):
             from .capture import capture
 
-            source = capture_guard(
-                config["hardware_database"],
-                config["minimum_capture_charge_percent"],
-                config["power"]["battery_profile_verified"],
-            )
-            emit(capture(spool, time_source=source, **config["camera"]))
+            def guarded_capture():
+                source = capture_guard(
+                    config["hardware_database"],
+                    config["minimum_capture_charge_percent"],
+                    config["power"]["battery_profile_verified"],
+                )
+                return capture(spool, time_source=source, **config["camera"])
+
+            if arguments.command == "scheduled-capture":
+                from .scheduler import run_scheduled
+
+                emit(run_scheduled(config, guarded_capture))
+            else:
+                emit(guarded_capture())
         elif arguments.command == "status":
             pending = spool.list_pending()
             emit(

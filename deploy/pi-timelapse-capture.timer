@@ -1,9 +1,9 @@
 [Unit]
-Description=Capture a timelapse photograph every five minutes while powered
+Description=Check the configured timelapse capture schedule while powered
 
 [Timer]
 OnBootSec=2min
-OnUnitActiveSec=5min
+OnUnitInactiveSec=60s
 AccuracySec=1s
 Persistent=false
 Unit=pi-timelapse-capture.service

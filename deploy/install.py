@@ -8,7 +8,6 @@ from pathlib import Path
 import platform
 import re
 import stat
-import struct
 import subprocess
 import sys
 import tempfile
@@ -23,12 +22,16 @@ PACKAGE_FILES = (
     "config.py",
     "ha.py",
     "ha_config.py",
+    "ha_controls.py",
     "ha_discovery.py",
     "ha_metrics.py",
     "ha_mqtt.py",
     "ha_photos.py",
     "power.py",
     "receiver.py",
+    "scheduler.py",
+    "setup.py",
+    "ssh_gateway.py",
     "spool.py",
     "transfer.py",
 )
@@ -154,22 +157,24 @@ class Installer:
     def preflight(self, apply=False):
         if apply and os.geteuid() != 0:
             raise InstallError("--apply requires root")
-        if sys.version_info[:2] != (3, 11):
-            raise InstallError("Deployment requires Python 3.11")
+        if sys.version_info < (3, 11):
+            raise InstallError("Deployment requires Python 3.11 or newer")
         model = self.path("/proc/device-tree/model").read_text().rstrip("\x00\n")
-        if (
-            model != "Raspberry Pi Zero W Rev 1.1"
-            or platform.machine() != "armv6l"
-            or struct.calcsize("P") != 4
-        ):
+        if not model.startswith("Raspberry Pi ") or platform.machine() not in {
+            "armv6l",
+            "armv7l",
+            "aarch64",
+        }:
             raise InstallError(
-                "Deployment supports Raspberry Pi Zero W Rev 1.1 with a 32-bit ARMv6 OS"
+                "Camera deployment requires an ARM Raspberry Pi; use package installation on an archive server"
             )
         release = self.path("/etc/os-release").read_text()
         if not re.search(
-            r'^VERSION_CODENAME=["\']?bookworm["\']?$', release, re.M
+            r'^VERSION_CODENAME=["\']?(bookworm|trixie)["\']?$', release, re.M
         ) or not re.search(r'^ID=["\']?(raspbian|debian)["\']?$', release, re.M):
-            raise InstallError("Deployment requires Raspberry Pi OS Bookworm")
+            raise InstallError(
+                "Deployment requires Debian/Raspberry Pi OS Bookworm or Trixie"
+            )
         self.checked(["systemctl", "show", "--property=Version", "--value"])
 
     def check_parent_directories(self, name):

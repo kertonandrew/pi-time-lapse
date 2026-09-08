@@ -5,6 +5,7 @@ import argparse
 import hashlib
 import json
 from pathlib import Path
+import re
 import secrets
 import shutil
 import subprocess
@@ -146,7 +147,7 @@ def inside():
     tls_version = subscriber.socket().version()
     subscriber.loop_start()
     try:
-        subscriber.subscribe(PREFIX + "/#", qos=1)
+        subscriber.subscribe("pi_timelapse/#", qos=1)
         if not subscribed.wait(10):
             raise TimeoutError(
                 "Authenticated observer subscription was not acknowledged"
@@ -241,10 +242,112 @@ def inside():
             "observation_window_after_control_seconds": 2,
             "interpretation": "MQTT 3.1.1 QoS1 acknowledgement alone does not prove ACL-authorized delivery",
         }
+        report["camera_controls_acl"] = verify_controls_acl(settings, root, received)
         return report
     finally:
         subscriber.disconnect()
         subscriber.loop_stop()
+
+
+def verify_controls_acl(settings, root, observed):
+    from timelapse.ha_mqtt import MQTTError, publish_messages, receive_messages
+
+    desired = PREFIX + "/desired/interval_seconds"
+    reported = PREFIX + "/reported/interval_seconds"
+    controls_connection = PREFIX + "/connection/controls"
+    homeassistant = dict(
+        settings, username="observer", password_file=str(root / "observer-password")
+    )
+    source = dict(
+        settings,
+        username="fixture-source",
+        password_file=str(root / "fixture-source-password"),
+    )
+
+    def send(credentials, topic, value, connection, identifier):
+        try:
+            publish_messages(
+                credentials, [(topic, value, True)], identifier, connection
+            )
+            return True
+        except MQTTError:
+            return False
+
+    if not send(
+        homeassistant, desired, b"600", "homeassistant/status", "controls-ha-desired"
+    ):
+        raise AssertionError("Authorized Home Assistant desired publication failed")
+    read = receive_messages(
+        settings, [desired], "controls-pi-read", controls_connection, 0.5
+    )
+    if read != [(desired, b"600")]:
+        raise AssertionError(
+            "Pi did not receive Home Assistant's retained desired setting"
+        )
+    pi_desired_success = send(
+        settings, desired, b"900", controls_connection, "controls-pi-forbidden-desired"
+    )
+    if not send(
+        settings, reported, b"600", controls_connection, "controls-pi-reported"
+    ):
+        raise AssertionError("Authorized Pi reported publication failed")
+    ha_reported_success = send(
+        homeassistant,
+        reported,
+        b"900",
+        "homeassistant/status",
+        "controls-ha-forbidden-reported",
+    )
+    retained_report = receive_messages(
+        homeassistant, [reported], "controls-ha-read", "homeassistant/status", 0.5
+    )
+    retained_desired = receive_messages(
+        settings, [desired], "controls-pi-recheck", controls_connection, 0.5
+    )
+    if retained_desired != [(desired, b"600")] or retained_report != [
+        (reported, b"600")
+    ]:
+        raise AssertionError("A forbidden writer changed retained camera configuration")
+    if (desired, b"900") in observed or (reported, b"900") in observed:
+        raise AssertionError("Observer received a forbidden camera control publication")
+    other_desired = "pi_timelapse/security_other/desired/interval_seconds"
+    if not send(
+        source,
+        other_desired,
+        b"1200",
+        "security-fixture/connection",
+        "controls-other-source",
+    ):
+        raise AssertionError("Cross-device test source publication failed")
+    deadline = time.monotonic() + 3
+    while (other_desired, b"1200") not in observed:
+        if time.monotonic() >= deadline:
+            raise AssertionError(
+                "Observer did not confirm the cross-device test payload"
+            )
+        time.sleep(0.05)
+    try:
+        other_messages = receive_messages(
+            settings,
+            [other_desired],
+            "controls-pi-forbidden-read",
+            controls_connection,
+            0.5,
+        )
+    except MQTTError:
+        other_messages = []
+    if other_messages:
+        raise AssertionError("Pi received another device's desired configuration")
+    return {
+        "tls_retained_desired_received_by_bounded_production_subscriber": True,
+        "pi_reported_setting_received_by_home_assistant_principal": True,
+        "pi_cannot_write_desired": True,
+        "home_assistant_cannot_write_reported": True,
+        "pi_cannot_read_other_device_desired": True,
+        "forbidden_pi_desired_publish_returned_success": pi_desired_success,
+        "forbidden_home_assistant_reported_publish_returned_success": ha_reported_success,
+        "proof": "retained payloads and independent observer delivery checked; PUBACK alone is not authorization proof",
+    }
 
 
 def acceptance(output):
@@ -267,7 +370,7 @@ def acceptance(output):
     broker = network + "-broker"
     client = network + "-client"
     password_container = network + "-password"
-    for index, username in enumerate(("telemetry", "observer")):
+    for index, username in enumerate(("telemetry", "observer", "fixture-source")):
         password = secrets.token_urlsafe(32)
         write_private(client_root / (username + "-password"), password)
         arguments = [
@@ -296,11 +399,17 @@ def acceptance(output):
     acl_template = (
         source_root / "deploy/home-assistant/mosquitto.acl.example"
     ).read_text()
-    (broker_root / "acl").write_text(
-        acl_template.replace("timelapse-zero-01", "security_camera")
-        .replace("user security_camera", "user telemetry")
-        .replace("user homeassistant", "user observer")
-    )
+    device_match = re.search(r"pi_timelapse/([^/]+)/state", acl_template)
+    principal_match = re.search(r"^user (\S+)$", acl_template, re.MULTILINE)
+    if device_match is None or principal_match is None:
+        raise ValueError("Camera ACL template identity was not found")
+    fixture_acl = acl_template.replace(device_match[1], "security_camera")
+    principal = principal_match[1].replace(device_match[1], "security_camera")
+    fixture_acl = fixture_acl.replace(
+        f"user {principal}\n", "user telemetry\n"
+    ).replace("user homeassistant\n", "user observer\n")
+    fixture_acl += "\nuser fixture-source\n topic write pi_timelapse/security_other/desired/interval_seconds\n topic write security-fixture/connection\n"
+    (broker_root / "acl").write_text(fixture_acl)
     (broker_root / "mosquitto.conf").write_text(
         "listener 8883\nallow_anonymous false\n"
         "certfile /tmp/security/server.crt\nkeyfile /tmp/security/server.key\n"
@@ -317,7 +426,7 @@ def acceptance(output):
     report = {
         "recorded_at_utc": datetime.now(timezone.utc).isoformat(),
         "scope": "real TLS/authentication/ACL broker test with synthetic data and ephemeral credentials",
-        "temporary_directory": str(root),
+        "temporary_directory": "ephemeral test workspace",
         "network_is_internal": True,
         "published_host_ports": [],
         "real_hardware_or_production_credentials_used": False,
@@ -326,7 +435,7 @@ def acceptance(output):
         ).hexdigest(),
         "acl_template": "deploy/home-assistant/mosquitto.acl.example",
         "acl_template_sha256": hashlib.sha256(acl_template.encode()).hexdigest(),
-        "acl_substitutions": "test-only device identifier and telemetry/observer usernames; whitespace preserved",
+        "acl_substitutions": "synthetic device and telemetry/observer principals; one isolated fixture-source grant supplies the other-device negative test",
         "images": {
             image: json.loads(docker("image", "inspect", image))[0]["Id"]
             for image in (BROKER_IMAGE, CLIENT_IMAGE)
@@ -383,8 +492,6 @@ def acceptance(output):
     except Exception as error:
         report["completed"] = False
         report["failure_type"] = type(error).__name__
-        if isinstance(error, subprocess.CalledProcessError) and error.stderr:
-            report["failure_last_line"] = error.stderr.splitlines()[-1][:300]
         raise
     finally:
         cleanup = []
@@ -393,9 +500,9 @@ def acceptance(output):
                 docker("rm", "-f", name) if kind == "container" else docker(
                     "network", "rm", name
                 )
-                cleanup.append({"kind": kind, "name": name, "removed": True})
+                cleanup.append({"kind": kind, "removed": True})
             except subprocess.CalledProcessError:
-                cleanup.append({"kind": kind, "name": name, "removed": False})
+                cleanup.append({"kind": kind, "removed": False})
         report["cleanup"] = cleanup
         output.write_text(json.dumps(report, indent=2) + "\n")
     print(json.dumps({"report": str(output), "completed": True}))

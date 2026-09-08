@@ -27,8 +27,18 @@ The installer previews by default. Applying installs the package under
 `/usr/local/lib/pi-timelapse/timelapse`, four systemd units, and a mode-0600
 `/etc/pi-timelapse.json` only if it is absent. An existing configuration is preserved.
 Initial timers remain disabled; updates preserve their previous enabled/active state.
-The supported deployment target is the original 32-bit ARMv6 Pi Zero W on Bookworm
-with Python 3.11 and the working hardware recorder already installed.
+The application installer accepts ARM Raspberry Pi hardware on Debian/Raspberry Pi
+OS Bookworm or Trixie with Python 3.11 or newer and systemd. Physical measurements
+cover the original Pi Zero W only. The separate hardware installer remains limited
+to that reviewed Zero W/Bookworm target. A working hardware recorder is required
+before real capture.
+
+Start with the private configuration generator in [the quickstart](../README.md).
+For a fresh installation, edit its `local/camera.json`, validate it with `doctor`,
+and install it as `/etc/pi-timelapse.json`, owner root, mode 0600. Keep an existing
+installation's configuration when upgrading. JSON files must be regular files, not
+symlinks, and at most 64 KiB. Configuration can supply a partial object; omitted
+values use the documented defaults.
 
 `capture --dry-run` displays the requested capture without reading hardware or
 creating the image queue. A normal capture checks the latest hardware record before
@@ -47,23 +57,43 @@ sudo journalctl -u pi-timelapse-capture.service -n 30 --no-pager
 ```
 
 Capture emits its filename, SHA-256, size, timestamp, time-quality label, boot ID and
-duration. The output is a 4608 × 2592 JPEG by default, rotated 180° for the current
-mounting direction. Confirm the image visually after mounting. A 45-second process
+duration. Fresh defaults use the camera's native resolution (`width: 0`, `height: 0`),
+rotation 0 and JPEG quality 90. Set both dimensions together for a fixed size.
+Existing configured dimensions and rotation are preserved on upgrade. Confirm the
+image visually after mounting. A 45-second process
 timeout bounds camera execution; failed or incomplete output is not acknowledged as
 a successful capture.
 
 ## Timers and retention
 
-Enable capture after checking one real image:
+After checking one real image, set `schedule.enabled` to `true` and
+`schedule.interval_seconds` to your desired interval (default 300), then enable
+the timer:
 
 ```sh
 sudo systemctl enable --now pi-timelapse-capture.timer
 systemctl list-timers 'pi-timelapse-*' --no-pager
 ```
 
-The capture timer first runs two minutes after boot, then every 30 minutes while
-powered. It does not replay all missed photographs after downtime. A capture service
-is one-shot, so the same service is not started concurrently by its timer.
+The timer first runs two minutes after boot and checks again one minute after each
+invocation finishes while powered.
+`scheduled-capture` checks the configured interval (60–86400 seconds) and takes at
+most one photograph when due. Attempts, including rejected or failed captures, are
+spaced by that interval. It does not replay missed photographs after downtime.
+The scheduler uses monotonic time within a boot and serializes concurrent attempts.
+Manual `capture` remains available when scheduled capture is disabled.
+
+Intervals are minimum spacing, not exact wall-clock appointments: the next check
+can be delayed by capture duration and the timer interval. Scheduling from service
+completion also handles an invocation that outlasts a one-minute tick. See
+[systemd timer semantics](https://github.com/systemd/systemd/blob/main/man/systemd.timer.xml).
+
+On upgrade, an older configuration with no `schedule` section now defaults to
+disabled scheduled capture: opt in explicitly. Remote settings, when enabled, are
+read once per attempt; an in-progress photograph finishes with its original
+settings. The [Home Assistant guide](home-assistant.md) explains remote opt-in and
+the additional bounded polling service. A Home Assistant schedule switch cannot
+start an operating-system timer that an administrator has disabled.
 
 The default spool is `/var/lib/pi-timelapse`:
 
@@ -74,6 +104,7 @@ The default spool is `/var/lib/pi-timelapse`:
 | `receipts/` | Verified server acknowledgments |
 | `power-history.sqlite3` | Observations and admission state |
 | `transfer-state.json` | Attempt/probe cooldown state |
+| `schedule-state.json` | Last scheduled attempt and boot identity |
 
 Images, manifests and receipts have a combined 2 GiB limit. Capture also preserves
 512 MiB of filesystem free space and reserves room for the largest permitted image
@@ -124,9 +155,19 @@ numeric values are rejected.
     "camera_command": "/usr/bin/rpicam-still",
     "timeout_seconds": 45,
     "settle_ms": 1000,
-    "width": 4608,
-    "height": 2592,
-    "rotation": 180
+    "width": 0,
+    "height": 0,
+    "rotation": 0,
+    "quality": 90
+  },
+  "schedule": {
+    "enabled": false,
+    "interval_seconds": 300
+  },
+  "remote_controls": {
+    "enabled": false,
+    "device_id": null,
+    "state_path": "/var/lib/pi-timelapse-controls/settings.json"
   },
   "power": {
     "sensor_path": "/run/pi-power/latest.json",
@@ -251,25 +292,15 @@ strongest half-hour is an observed, demand-biased interval, not the daily solar 
 
 ## Provision an SSH receiver
 
-Use a Linux server with Python 3 and rsync. This example uses a new dedicated
-unprivileged account `timelapse_ingest`, host `images.example.net`, device `zero-01`,
-root `/srv/pi-timelapse`, and a root-owned receiver script. Substitute the actual
-server hostname and provision it through a trusted administration connection.
-No server has been selected or configured by this runbook.
+Use a maintained Linux server with Python 3.11 or newer, OpenSSH and rsync. Follow
+[the restricted receiver guide](ssh-receiver.md) to install the complete package,
+create a separate unprivileged account per camera and restrict accepted commands.
+The `restrict` key option alone permits arbitrary remote commands; the supplied
+gateway adds a fixed device, destination and command allowlist.
 
-On the server, from a checkout containing `timelapse/receiver.py`:
-
-```sh
-sudo adduser --disabled-password --gecos '' timelapse_ingest
-sudo install -d -m 0755 /usr/local/lib/pi-timelapse-receiver
-sudo install -m 0644 timelapse/receiver.py /usr/local/lib/pi-timelapse-receiver/receiver.py
-sudo install -d -o timelapse_ingest -g timelapse_ingest -m 0700 /srv/pi-timelapse
-sudo install -d -o timelapse_ingest -g timelapse_ingest -m 0700 /home/timelapse_ingest/.ssh
-sudo ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub
-sudo cat /etc/ssh/ssh_host_ed25519_key.pub
-```
-
-On the Pi, generate a dedicated transfer key if one does not already exist:
+Use `camera01` consistently in that guide and your local configuration, or replace
+it everywhere with your device ID. On the Pi, generate a dedicated transfer key
+only if one does not already exist:
 
 ```sh
 sudo install -d -m 0700 /etc/pi-timelapse/ssh
@@ -277,49 +308,38 @@ sudo ssh-keygen -t ed25519 -N '' -f /etc/pi-timelapse/ssh/id_ed25519
 sudo cat /etc/pi-timelapse/ssh/id_ed25519.pub
 ```
 
-Install that public key as a mode-0600 `authorized_keys` file owned by
-`timelapse_ingest` in its `.ssh` directory. Prefix the key line with `restrict` to
-disable forwarding and interactive facilities while permitting the required commands.
-The account must have no sudo privileges and must be able to execute both Python and
-rsync; an SFTP-only forced command will not support this protocol.
+Install that public key through a trusted server administration connection as
+described in the receiver guide. Also obtain the server's host public key and
+verify its fingerprint through that trusted connection. Create the Pi's
+`/etc/pi-timelapse/ssh/known_hosts` with mode 0600. For port 22 its line is
+`images.example.net ssh-ed25519 REPLACE_WITH_VERIFIED_HOST_PUBLIC_KEY`;
+for another port use `[images.example.net]:PORT`. Do not accept an unknown host key
+unattended or disable host-key verification.
 
-On the Pi, create `/etc/pi-timelapse/ssh/known_hosts`, mode 0600, using the server's
-public host key obtained through the trusted connection. For port 22, its line is
-`images.example.net ssh-ed25519 <verified-server-public-key>`. For another port use
-`[images.example.net]:PORT`. Compare its fingerprint to the server output. Do not
-make unattended operation depend on accepting an unknown key at first connection.
-
-Replace only the `server` section of `/etc/pi-timelapse.json` with:
+Replace the local `server: null` value with:
 
 ```json
 {
-  "enabled": true,
   "host": "images.example.net",
   "port": 22,
-  "user": "timelapse_ingest",
+  "user": "timelapse_camera01",
   "remote_root": "/srv/pi-timelapse",
-  "device_id": "zero-01",
+  "device_id": "camera01",
   "identity_file": "/etc/pi-timelapse/ssh/id_ed25519",
   "known_hosts_file": "/etc/pi-timelapse/ssh/known_hosts",
   "receiver_path": "/usr/local/lib/pi-timelapse-receiver/receiver.py",
-  "file_timeout_seconds": 60
+  "file_timeout_seconds": 60,
+  "ssh_gateway": true
 }
 ```
 
-All server paths are absolute and contain no spaces or traversal. Device IDs contain
-letters, digits, underscores and hyphens, beginning with a letter or digit. The key
-and known-hosts file must exist before an actual transfer. Server setup alone does
-not enable automatic upload; the sensor and power gates must also qualify.
+`receiver_path` must match the gateway's configured command token; the gateway
+executes its installed module instead. Server paths must be absolute without
+spaces or traversal. The identity and known-hosts files must exist before a real
+transfer. Destination setup alone does not enable upload; the calibrated sensor
+and power gates must also qualify. Keep the transfer timer disabled until then.
 
-The receiver can be initialized locally on the server to check paths and ownership:
-
-```sh
-sudo -u timelapse_ingest python3 /usr/local/lib/pi-timelapse-receiver/receiver.py init --root /srv/pi-timelapse --device zero-01 <<'JSON'
-{"protocol":1,"files":[]}
-JSON
-```
-
-Published originals appear in `/srv/pi-timelapse/zero-01/images`, with manifests and
+Published originals appear in `/srv/pi-timelapse/camera01/images`, with manifests and
 receipts in sibling directories. Each upload batch normally uses **three SSH
 connections**: initialize/recover receipts, one rsync transfer, then commit the batch.
 An already committed batch can recover missing local receipts during initialization

@@ -1,6 +1,9 @@
 import copy
 import json
 import math
+import os
+import re
+import stat
 from pathlib import Path
 
 
@@ -14,9 +17,16 @@ DEFAULTS = {
         "camera_command": "/usr/bin/rpicam-still",
         "timeout_seconds": 45,
         "settle_ms": 1000,
-        "width": 4608,
-        "height": 2592,
-        "rotation": 180,
+        "width": 0,
+        "height": 0,
+        "rotation": 0,
+        "quality": 90,
+    },
+    "schedule": {"enabled": False, "interval_seconds": 300},
+    "remote_controls": {
+        "enabled": False,
+        "device_id": None,
+        "state_path": "/var/lib/pi-timelapse-controls/settings.json",
     },
     "power": {
         "sensor_path": "/run/pi-power/latest.json",
@@ -75,7 +85,19 @@ def absolute_path(value, name):
 
 
 def load_config(path):
-    overrides = json.loads(Path(path).read_text()) if path is not None else {}
+    if path is None:
+        return validate_config({})
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(descriptor, "rb") as source:
+        if not stat.S_ISREG(os.fstat(source.fileno()).st_mode):
+            raise ValueError("Configuration must be a regular file")
+        payload = source.read(65537)
+    if len(payload) > 65536:
+        raise ValueError("Configuration exceeds 64 KiB")
+    return validate_config(json.loads(payload))
+
+
+def validate_config(overrides):
     if not isinstance(overrides, dict):
         raise ValueError("Configuration must be an object")
     result = merge(DEFAULTS, overrides)
@@ -146,8 +168,16 @@ def load_config(path):
         raise ValueError("Invalid capture reserve")
     camera = result["camera"]
     absolute_path(camera["camera_command"], "camera.camera_command")
-    for key in ("timeout_seconds", "width", "height"):
+    for key in ("timeout_seconds", "quality"):
         positive_integer(camera[key], f"camera.{key}")
+    for key in ("width", "height"):
+        positive_integer(camera[key], f"camera.{key}", minimum=0)
+        if camera[key] > 16384:
+            raise ValueError("Camera dimensions must not exceed 16384 pixels")
+    if bool(camera["width"]) != bool(camera["height"]):
+        raise ValueError("Set both dimensions or use zero for native resolution")
+    if not 1 <= camera["quality"] <= 100:
+        raise ValueError("Camera JPEG quality must be in 1..100")
     positive_integer(camera["settle_ms"], "camera.settle_ms")
     if camera["timeout_seconds"] > 3600:
         raise ValueError("Camera timeout must not exceed 3600 seconds")
@@ -157,4 +187,50 @@ def load_config(path):
         )
     if type(camera["rotation"]) is not int or camera["rotation"] not in (0, 180):
         raise ValueError("Camera rotation must be 0 or 180")
+    schedule = result["schedule"]
+    if type(schedule["enabled"]) is not bool:
+        raise ValueError("schedule.enabled must be a boolean")
+    positive_integer(schedule["interval_seconds"], "schedule.interval_seconds", 60)
+    if schedule["interval_seconds"] > 86400:
+        raise ValueError("Schedule interval must not exceed 86400 seconds")
+    remote = result["remote_controls"]
+    if type(remote["enabled"]) is not bool:
+        raise ValueError("remote_controls.enabled must be a boolean")
+    absolute_path(remote["state_path"], "remote_controls.state_path")
+    if ".." in Path(remote["state_path"]).parts:
+        raise ValueError("Remote settings path must not contain traversal")
+    if remote["device_id"] is not None and (
+        not isinstance(remote["device_id"], str)
+        or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", remote["device_id"])
+    ):
+        raise ValueError("Remote device ID must be a stable safe identifier")
+    if remote["enabled"] and not remote["device_id"]:
+        raise ValueError("Remote controls require a device ID")
+    if remote["enabled"]:
+        from .ha_controls import defaults_from_config
+
+        defaults_from_config(result)
     return result
+
+
+def effective_config(config):
+    """Snapshot allowlisted remote settings without changing local safety policy."""
+    if not config["remote_controls"]["enabled"]:
+        return copy.deepcopy(config)
+    from .ha_controls import effective_settings
+
+    settings = effective_settings(config)
+    result = copy.deepcopy(config)
+    result["schedule"].update(
+        enabled=settings["capture_enabled"],
+        interval_seconds=settings["interval_seconds"],
+    )
+    result["camera"].update(
+        quality=settings["jpeg_quality"],
+        rotation=settings["rotation"],
+        settle_ms=settings["settle_ms"],
+    )
+    if settings["resolution"] != "configured":
+        width, height = settings["resolution"].split("x")
+        result["camera"].update(width=int(width), height=int(height))
+    return validate_config(result)

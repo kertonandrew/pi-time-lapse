@@ -6,6 +6,7 @@ from pathlib import Path
 import stat
 import tempfile
 import unittest
+from unittest.mock import patch
 
 
 SPEC = importlib.util.spec_from_file_location(
@@ -90,6 +91,35 @@ class DeploymentTests(unittest.TestCase):
 
     def install(self):
         return self.deployer.apply(self.deployer.plan(), self.deployer.states())
+
+    def test_preflight_accepts_supported_os_and_arm_pi_combinations(self):
+        self.write_target("/proc/device-tree/model", b"Raspberry Pi Zero W Rev 1.1\0")
+        for architecture in ("armv6l", "armv7l", "aarch64"):
+            for release in ("bookworm", "trixie"):
+                with self.subTest(architecture=architecture, release=release):
+                    self.write_target(
+                        "/etc/os-release",
+                        f'ID=debian\nVERSION_CODENAME="{release}"\n'.encode(),
+                    )
+                    with patch.object(
+                        installer.platform, "machine", return_value=architecture
+                    ):
+                        self.deployer.preflight()
+
+    def test_preflight_rejects_other_hardware_and_unsupported_os(self):
+        self.write_target("/proc/device-tree/model", b"Other ARM computer\0")
+        self.write_target("/etc/os-release", b"ID=debian\nVERSION_CODENAME=bookworm\n")
+        with patch.object(installer.platform, "machine", return_value="aarch64"):
+            with self.assertRaises(installer.InstallError):
+                self.deployer.preflight()
+            self.write_target(
+                "/proc/device-tree/model", b"Raspberry Pi 5 Model B Rev 1.0\0"
+            )
+            self.write_target(
+                "/etc/os-release", b"ID=debian\nVERSION_CODENAME=bullseye\n"
+            )
+            with self.assertRaises(installer.InstallError):
+                self.deployer.preflight()
 
     def write_target(self, name, data, mode=0o644):
         path = self.deployer.path(name)

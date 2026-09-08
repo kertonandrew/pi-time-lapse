@@ -37,6 +37,9 @@ def _positive_seconds(value, name):
 
 def _validate_config(config):
     result = dict(config)
+    result["ssh_gateway"] = result.get("ssh_gateway", False)
+    if type(result["ssh_gateway"]) is not bool:
+        raise ValueError("Transfer ssh_gateway must be a boolean")
     for name, pattern in (
         ("host", HOST_PATTERN),
         ("user", USER_PATTERN),
@@ -389,7 +392,7 @@ def transfer(spool, config, eligible, max_bytes=33554432, max_seconds=120):
                 "rsync",
                 "--partial",
                 "--partial-dir=.rsync-partial",
-                "--protect-args",
+                "--no-protect-args" if config["ssh_gateway"] else "--protect-args",
                 "--checksum",
                 "--from0",
                 "--files-from=-",

@@ -49,6 +49,11 @@ class FakeClient:
         self.loop_stop = Mock()
         self.disconnect_count = 0
         self.connect = Mock(return_value=0)
+        self.incoming = []
+        self.subscription_reasons = None
+        self.suppress_suback = False
+        self.disconnect_on_subscribe = False
+        self.subscriptions = []
 
     def loop_start(self):
         if not self.suppress_connack:
@@ -65,6 +70,18 @@ class FakeClient:
         self.disconnect_count += 1
         self.on_disconnect(self, None, None, 0, None)
         return 0
+
+    def subscribe(self, topics):
+        self.subscriptions = topics
+        if not self.suppress_suback:
+            self.on_subscribe(
+                self, None, 7, self.subscription_reasons or [1] * len(topics), None
+            )
+        for topic, payload in self.incoming:
+            self.on_message(self, None, SimpleNamespace(topic=topic, payload=payload))
+        if self.disconnect_on_subscribe:
+            self.on_disconnect(self, None, None, 1, None)
+        return 0, 7
 
 
 class MQTTSessionTests(unittest.TestCase):
@@ -95,6 +112,57 @@ class MQTTSessionTests(unittest.TestCase):
             "camera-telemetry",
             CONNECTION_TOPIC,
         )
+
+    def receive(self, settings=None):
+        return ha_mqtt._publish_session(
+            settings or {"host": "mqtt.example"},
+            [],
+            "camera-controls-read",
+            CONNECTION_TOPIC,
+            (["camera/desired/interval_seconds"], 0.001),
+        )
+
+    def test_bounded_subscription_requires_suback_and_preserves_small_payloads(self):
+        self.client.incoming = [("camera/desired/interval_seconds", b"300")]
+        self.assertEqual(self.receive(), self.client.incoming)
+        self.assertEqual(
+            self.client.subscriptions, [("camera/desired/interval_seconds", 1)]
+        )
+        self.assertEqual(
+            self.client.sent,
+            [
+                (CONNECTION_TOPIC, b"online", 1, True),
+                (CONNECTION_TOPIC, b"offline", 1, True),
+            ],
+        )
+        self.client.tls_set_context.assert_called_once_with(self.context)
+        self.assertEqual(self.context.verify_mode, ssl.CERT_REQUIRED)
+
+    def test_subscription_rejection_timeout_and_disconnect_never_return_commands(self):
+        for failure in ("rejected", "timeout", "disconnected"):
+            self.client.subscription_reasons = [128] if failure == "rejected" else None
+            self.client.suppress_suback = failure == "timeout"
+            self.client.disconnect_on_subscribe = failure == "disconnected"
+            with self.subTest(failure=failure), self.assertRaises(ha_mqtt.MQTTError):
+                self.receive(
+                    {"host": "mqtt.lan", "tls": False, "timeout_seconds": 0.01}
+                )
+        self.assertEqual(self.client.disconnect_count, 0)
+
+    def test_control_flood_oversize_and_unsubscribed_topic_abort_entire_batch(self):
+        topic = "camera/desired/interval_seconds"
+        for incoming in (
+            [(topic, b"300")] * 65,
+            [(topic, b"x" * 65)],
+            [("other-camera/desired/interval_seconds", b"300")],
+        ):
+            self.client.incoming = incoming
+            with (
+                self.subTest(count=len(incoming)),
+                self.assertRaises(ha_mqtt.MQTTError),
+            ):
+                self.receive()
+        self.assertEqual(self.client.disconnect_count, 0)
 
     def test_qos1_acknowledged_online_messages_and_offline_use_clean_v311_session(self):
         self.publish()
@@ -246,6 +314,101 @@ class MQTTSessionTests(unittest.TestCase):
 
 
 class MQTTWorkerTests(unittest.TestCase):
+    def test_publish_and_receive_workers_preserve_parent_import_isolation(self):
+        def reply(*_args, **kwargs):
+            if kwargs["stdout"] != subprocess.DEVNULL:
+                kwargs["stdout"].write(b"[]")
+            return SimpleNamespace(returncode=0)
+
+        for isolated in (0, 1):
+            with (
+                self.subTest(isolated=isolated),
+                patch.object(ha_mqtt.sys, "flags", SimpleNamespace(isolated=isolated)),
+                patch.object(ha_mqtt.subprocess, "run", side_effect=reply) as run,
+            ):
+                ha_mqtt.publish_messages(
+                    {"host": "mqtt.lan"}, MESSAGES, "camera", CONNECTION_TOPIC
+                )
+                ha_mqtt.receive_messages(
+                    {"host": "mqtt.lan"},
+                    ["camera/desired/interval_seconds"],
+                    "camera-controls",
+                    CONNECTION_TOPIC,
+                )
+            self.assertEqual(run.call_count, 2)
+            for call in run.call_args_list:
+                self.assertEqual(
+                    call.args[0],
+                    [
+                        ha_mqtt.sys.executable,
+                        *(["-I"] if isolated else []),
+                        "-m",
+                        "timelapse.ha_mqtt",
+                        "--worker",
+                    ],
+                )
+
+    def test_control_worker_result_is_bounded_decoded_and_uses_no_secret_arguments(
+        self,
+    ):
+        topic = "camera/desired/interval_seconds"
+
+        def reply(*_args, **kwargs):
+            kwargs["stdout"].write(json.dumps([(topic, "MzAw")]).encode())
+            return SimpleNamespace(returncode=0)
+
+        settings = {
+            "host": "mqtt.lan",
+            "username": "camera",
+            "password_file": "/run/secrets/mqtt",
+        }
+        with patch.object(ha_mqtt.subprocess, "run", side_effect=reply) as run:
+            result = ha_mqtt.receive_messages(
+                settings, [topic], "camera-controls", CONNECTION_TOPIC
+            )
+        self.assertEqual(result, [(topic, b"300")])
+        self.assertNotIn("/run/secrets/mqtt", repr(run.call_args.args[0]))
+        self.assertEqual(run.call_args.kwargs["stderr"], subprocess.DEVNULL)
+        request = json.loads(run.call_args.kwargs["input"])
+        self.assertEqual(request["mode"], "receive")
+        self.assertEqual(request["topics"], [topic])
+        self.assertLessEqual(run.call_args.kwargs["timeout"], 20)
+
+    def test_control_result_and_subscription_validation_are_bounded(self):
+        topic = "camera/desired/interval_seconds"
+        results = [
+            b"x" * (ha_mqtt.MAX_CONTROL_RESULT_BYTES + 1),
+            b"{}",
+            b"not JSON",
+            json.dumps([(topic, "MzAw")] * 65).encode(),
+            json.dumps([("other-camera/desired/interval_seconds", "MzAw")]).encode(),
+            json.dumps([(topic, base64.b64encode(b"x" * 65).decode())]).encode(),
+        ]
+        for payload in results:
+
+            def reply(*_args, **kwargs):
+                kwargs["stdout"].write(payload)
+                return SimpleNamespace(returncode=0)
+
+            with patch.object(ha_mqtt.subprocess, "run", side_effect=reply):
+                with self.assertRaises(ha_mqtt.MQTTError):
+                    ha_mqtt.receive_messages(
+                        {"host": "mqtt.lan"}, [topic], "camera", CONNECTION_TOPIC
+                    )
+        with patch.object(ha_mqtt.subprocess, "run") as run:
+            for topics, poll in (
+                (["camera/#"], 3),
+                ([topic] * 2, 3),
+                ([], 3),
+                ([topic], float("inf")),
+                ([topic], 11),
+            ):
+                with self.assertRaises(ha_mqtt.MQTTError):
+                    ha_mqtt.receive_messages(
+                        {"host": "mqtt.lan"}, topics, "camera", CONNECTION_TOPIC, poll
+                    )
+        run.assert_not_called()
+
     def test_worker_ipc_encodes_bytes_but_exposes_no_credentials_in_argv_or_output(
         self,
     ):
@@ -294,7 +457,7 @@ class MQTTWorkerTests(unittest.TestCase):
 
     def test_invalid_publish_settings_fail_before_starting_worker(self):
         invalid_settings = [
-            {"host": "mqtt.lan", "password": "inline-secret"},
+            {"host": "mqtt.lan", "password": "example-only-password"},
             {"host": "mqtt.lan", "tls": "false"},
             {"host": "mqtt.lan", "tls": False, "ca_file": "/ca.pem"},
             {"host": "mqtt.lan", "password_file": "/secret"},

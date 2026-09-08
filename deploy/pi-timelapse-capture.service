@@ -5,7 +5,7 @@ After=pi-hardware.service
 [Service]
 Type=oneshot
 WorkingDirectory=/usr/local/lib/pi-timelapse
-ExecStart=/usr/bin/python3 -m timelapse --config /etc/pi-timelapse.json capture
+ExecStart=/usr/bin/python3 -m timelapse --config /etc/pi-timelapse.json scheduled-capture
 StateDirectory=pi-timelapse
 StateDirectoryMode=0700
 UMask=0077

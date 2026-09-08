@@ -12,12 +12,16 @@ import ssl
 import stat
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 
 
 MAX_REQUEST_BYTES = 67108864
 MAX_PAYLOAD_BYTES = 37748736
+MAX_CONTROL_MESSAGES = 64
+MAX_CONTROL_BYTES = 64
+MAX_CONTROL_RESULT_BYTES = 32768
 SETTINGS = {
     "host",
     "port",
@@ -98,8 +102,8 @@ def _settings(settings):
         result.get(name) for name in ("ca_file", "cert_file", "key_file")
     ):
         raise MQTTError("TLS certificate settings require TLS")
-    if result.get("key_file") and not result.get("cert_file"):
-        raise MQTTError("A client certificate is required with a key file")
+    if bool(result.get("key_file")) != bool(result.get("cert_file")):
+        raise MQTTError("Both MQTT client certificate and key are required")
     return result
 
 
@@ -158,13 +162,91 @@ def _messages(messages, connection_topic):
         raise MQTTError("MQTT publication batch exceeds its payload byte limit")
 
 
-def _publish_session(settings, messages, client_id, connection_topic):
+def _subscriptions(topics, poll_seconds):
+    if (
+        not isinstance(topics, list)
+        or not 1 <= len(topics) <= 6
+        or not all(isinstance(topic, str) for topic in topics)
+        or len(set(topics)) != len(topics)
+        or type(poll_seconds) not in (int, float)
+        or not math.isfinite(poll_seconds)
+        or not 0 < poll_seconds <= 10
+    ):
+        raise MQTTError("Invalid bounded MQTT subscription")
+    for topic in topics:
+        _topic(topic)
+        if len(topic.encode("utf-8")) > 256:
+            raise MQTTError("MQTT control topic exceeds its byte limit")
+
+
+def _send(client, mqtt, state, deadline, messages):
+    for topic, payload, retain in messages:
+        _remaining(deadline)
+        if state["disconnected"]:
+            raise MQTTError("MQTT connection ended before publication completed")
+        info = client.publish(topic, payload, qos=1, retain=retain)
+        if info.rc != mqtt.MQTT_ERR_SUCCESS:
+            raise MQTTError("MQTT publish was rejected")
+        info.wait_for_publish(timeout=_remaining(deadline))
+        if not info.is_published() or state["disconnected"]:
+            raise MQTTError("MQTT PUBACK was not received")
+        _remaining(deadline)
+
+
+def _poll(client, mqtt, state, deadline, subscription, received, invalid):
+    subscription_topics, poll_seconds = subscription
+    allowed = set(subscription_topics)
+    subscribed = threading.Event()
+    acknowledgments = {}
+
+    def on_subscribe(_client, _userdata, mid, reason_codes, _properties):
+        acknowledgments[mid] = len(reason_codes) == len(subscription_topics) and all(
+            reason == 1 for reason in reason_codes
+        )
+        subscribed.set()
+
+    def on_message(_client, _userdata, message):
+        if (
+            message.topic not in allowed
+            or not isinstance(message.payload, bytes)
+            or len(message.payload) > MAX_CONTROL_BYTES
+            or len(received) >= MAX_CONTROL_MESSAGES
+        ):
+            invalid.set()
+            return
+        received.append((message.topic, message.payload))
+
+    client.on_subscribe = on_subscribe
+    client.on_message = on_message
+    result, mid = client.subscribe([(topic, 1) for topic in subscription_topics])
+    if (
+        result != mqtt.MQTT_ERR_SUCCESS
+        or not subscribed.wait(_remaining(deadline))
+        or not acknowledgments.get(mid)
+        or state["disconnected"]
+    ):
+        raise MQTTError("MQTT subscriptions were refused or unacknowledged")
+    if poll_seconds >= _remaining(deadline):
+        raise MQTTError("MQTT subscription window exceeds the remaining deadline")
+    invalid.wait(poll_seconds)
+    _remaining(deadline)
+    if invalid.is_set() or state["disconnected"]:
+        raise MQTTError("MQTT control reception failed or exceeded its limits")
+
+
+def _publish_session(
+    settings, messages, client_id, connection_topic, subscription=None
+):
     settings = _settings(settings)
     _messages(messages, connection_topic)
+    if subscription is not None:
+        _subscriptions(*subscription)
     deadline = time.monotonic() + settings["timeout_seconds"]
     client = None
     loop_started = False
     graceful = False
+    received = []
+    invalid = threading.Event()
     try:
         mqtt = importlib.import_module("paho.mqtt.client")
         client = mqtt.Client(
@@ -214,21 +296,16 @@ def _publish_session(settings, messages, client_id, connection_topic):
             or state["disconnected"]
         ):
             raise MQTTError("MQTT connection was refused or unacknowledged")
-        for topic, payload, retain in (
-            (connection_topic, b"online", True),
-            *messages,
-            (connection_topic, b"offline", True),
-        ):
-            _remaining(deadline)
-            if state["disconnected"]:
-                raise MQTTError("MQTT connection ended before publication completed")
-            info = client.publish(topic, payload, qos=1, retain=retain)
-            if info.rc != mqtt.MQTT_ERR_SUCCESS:
-                raise MQTTError("MQTT publish was rejected")
-            info.wait_for_publish(timeout=_remaining(deadline))
-            if not info.is_published() or state["disconnected"]:
-                raise MQTTError("MQTT PUBACK was not received")
-            _remaining(deadline)
+        _send(
+            client,
+            mqtt,
+            state,
+            deadline,
+            [(connection_topic, b"online", True), *messages],
+        )
+        if subscription is not None:
+            _poll(client, mqtt, state, deadline, subscription, received, invalid)
+        _send(client, mqtt, state, deadline, [(connection_topic, b"offline", True)])
         if client.disconnect() != mqtt.MQTT_ERR_SUCCESS:
             raise MQTTError("MQTT graceful disconnect failed")
         graceful = True
@@ -250,6 +327,19 @@ def _publish_session(settings, messages, client_id, connection_topic):
             if loop_started:
                 with contextlib.suppress(Exception):
                     client.loop_stop()
+    if invalid.is_set():
+        raise MQTTError("MQTT control reception exceeded its limits")
+    return received
+
+
+def _worker_command():
+    return [
+        sys.executable,
+        *(["-I"] if sys.flags.isolated else []),
+        "-m",
+        "timelapse.ha_mqtt",
+        "--worker",
+    ]
 
 
 def publish_messages(
@@ -286,7 +376,7 @@ def publish_messages(
         raise MQTTError("MQTT worker request exceeds its byte limit")
     try:
         result = subprocess.run(
-            [sys.executable, "-m", "timelapse.ha_mqtt", "--worker"],
+            _worker_command(),
             input=request,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -302,6 +392,65 @@ def publish_messages(
     _remaining(deadline)
 
 
+def receive_messages(settings, topics, client_id, connection_topic, poll_seconds=3):
+    """Read at most 64 small messages from six exact topics in one bounded session."""
+    started = time.monotonic()
+    settings = _settings(settings)
+    _subscriptions(topics, poll_seconds)
+    _topic(connection_topic)
+    if (
+        not isinstance(client_id, str)
+        or not 1 <= len(client_id) <= 128
+        or "\x00" in client_id
+        or connection_topic in topics
+    ):
+        raise MQTTError("Invalid MQTT control session identity")
+    deadline = started + settings["timeout_seconds"]
+    request = json.dumps(
+        {
+            "mode": "receive",
+            "settings": settings,
+            "topics": topics,
+            "client_id": client_id,
+            "connection_topic": connection_topic,
+            "poll_seconds": poll_seconds,
+        },
+        allow_nan=False,
+        separators=(",", ":"),
+    ).encode()
+    try:
+        with tempfile.TemporaryFile() as output:
+            result = subprocess.run(
+                _worker_command(),
+                input=request,
+                stdout=output,
+                stderr=subprocess.DEVNULL,
+                timeout=_remaining(deadline),
+                check=False,
+            )
+            if result.returncode != 0:
+                raise MQTTError("MQTT worker could not complete control reception")
+            output.seek(0)
+            payload = output.read(MAX_CONTROL_RESULT_BYTES + 1)
+        if len(payload) > MAX_CONTROL_RESULT_BYTES:
+            raise MQTTError("MQTT worker result exceeded its byte limit")
+        messages = json.loads(payload)
+        if not isinstance(messages, list) or len(messages) > MAX_CONTROL_MESSAGES:
+            raise MQTTError("Invalid MQTT control result")
+        received = []
+        for topic, encoded in messages:
+            data = base64.b64decode(encoded, validate=True)
+            if topic not in topics or len(data) > MAX_CONTROL_BYTES:
+                raise MQTTError("Invalid MQTT control result")
+            received.append((topic, data))
+        _remaining(deadline)
+        return received
+    except Exception:
+        raise MQTTError(
+            "MQTT control reception failed or exceeded its deadline"
+        ) from None
+
+
 def main():
     if sys.argv[1:] != ["--worker"]:
         return 2
@@ -310,6 +459,26 @@ def main():
         if len(raw) > MAX_REQUEST_BYTES:
             return 2
         request = json.loads(raw)
+        if request.get("mode") == "receive":
+            messages = _publish_session(
+                request["settings"],
+                [],
+                request["client_id"],
+                request["connection_topic"],
+                (request["topics"], request["poll_seconds"]),
+            )
+            payload = json.dumps(
+                [
+                    (topic, base64.b64encode(data).decode("ascii"))
+                    for topic, data in messages
+                ],
+                separators=(",", ":"),
+            ).encode()
+            if len(payload) > MAX_CONTROL_RESULT_BYTES:
+                return 2
+            sys.stdout.buffer.write(payload)
+            sys.stdout.buffer.flush()
+            return 0
         messages = [
             (topic, base64.b64decode(payload, validate=True), retain)
             for topic, payload, retain in request["messages"]

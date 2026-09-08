@@ -33,6 +33,17 @@ class CliTests(unittest.TestCase):
             result = cli.upload(load_config(None), Mock(), Mock())
         self.assertEqual(result["action"], "wait")
 
+    def test_disabled_schedule_does_not_touch_hardware_or_storage(self):
+        output = StringIO()
+        with (
+            patch("timelapse.cli.capture_guard", side_effect=AssertionError),
+            patch("timelapse.cli.PowerHistory", side_effect=AssertionError),
+            patch("timelapse.spool.Spool", side_effect=AssertionError),
+            redirect_stdout(output),
+        ):
+            self.assertEqual(cli.main(["scheduled-capture"]), 0)
+        self.assertEqual(json.loads(output.getvalue())["action"], "wait")
+
     def test_failed_power_guard_never_invokes_camera(self):
         output = StringIO()
         with tempfile.TemporaryDirectory() as temporary:

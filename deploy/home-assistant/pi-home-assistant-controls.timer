@@ -1,0 +1,13 @@
+[Unit]
+Description=Check desired camera configuration during powered operation
+
+[Timer]
+OnBootSec=2min
+OnUnitInactiveSec=5min
+RandomizedDelaySec=15s
+AccuracySec=5s
+Persistent=false
+Unit=pi-home-assistant-controls.service
+
+[Install]
+WantedBy=timers.target

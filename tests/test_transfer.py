@@ -625,6 +625,21 @@ class TransferTests(unittest.TestCase):
         self.assertNotIn("--delete", rsync)
         self.assertNotIn("--remove-source-files", rsync)
 
+    def test_optional_ssh_gateway_keeps_server_options_visible(self):
+        self.config["ssh_gateway"] = True
+        self.assertEqual(self.run_transfer()["status"], "complete")
+        rsync = next(command for command in self.commands if command[0] == "rsync")
+        self.assertIn("--no-protect-args", rsync)
+        self.assertNotIn("--protect-args", rsync)
+        self.assertIn("--from0", rsync)
+        self.assertIn("--files-from=-", rsync)
+
+    def test_ssh_gateway_requires_an_explicit_boolean(self):
+        for value in ("true", 1, None, []):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                uploader._validate_config(dict(self.config, ssh_gateway=value))
+        self.assertIs(uploader._validate_config(self.config)["ssh_gateway"], False)
+
     def test_many_images_use_one_rsync_and_two_receiver_connections(self):
         self.spool.add("20260907T120001-second.jpg", b"second")
         self.spool.add("20260907T120002-third.jpg", b"third")

@@ -109,7 +109,7 @@ class ConfigTests(unittest.TestCase):
             {"rotation": False},
             {"rotation": "180"},
             {"width": True},
-            {"height": 0},
+            {"width": 100, "height": 0},
             {"settle_ms": 0},
             {"timeout_seconds": float("inf")},
             {"timeout_seconds": 3601},

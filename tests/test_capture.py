@@ -47,7 +47,9 @@ class CaptureTests(unittest.TestCase):
         )
         command = run.call_args.args[0]
         self.assertEqual(command[command.index("--encoding") + 1], "jpg")
-        self.assertEqual(command[command.index("--rotation") + 1], "180")
+        self.assertEqual(command[command.index("--rotation") + 1], "0")
+        self.assertEqual(command[command.index("--quality") + 1], "90")
+        self.assertNotIn("--width", command)
         self.assertEqual(run.call_args.kwargs["timeout"], 45)
         self.assertEqual(list(self.spool.images.glob(".*.part")), [])
 
@@ -63,6 +65,20 @@ class CaptureTests(unittest.TestCase):
         self.assertNotEqual(first["filename"], second["filename"])
         self.assertEqual(first["captured_at_utc"], second["captured_at_utc"])
         self.assertEqual(len(self.spool.list_pending()), 2)
+
+    def test_explicit_dimensions_and_quality_reach_camera(self):
+        with patch(
+            "timelapse.capture.subprocess.run", side_effect=self.fake_camera
+        ) as run:
+            capture(self.spool, width=1920, height=1080, quality=75, rotation=180)
+        command = run.call_args.args[0]
+        for flag, value in {
+            "--width": "1920",
+            "--height": "1080",
+            "--quality": "75",
+            "--rotation": "180",
+        }.items():
+            self.assertEqual(command[command.index(flag) + 1], value)
 
     def test_camera_failure_preserves_older_pending_images(self):
         with patch("timelapse.capture.subprocess.run", side_effect=self.fake_camera):

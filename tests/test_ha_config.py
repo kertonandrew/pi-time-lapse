@@ -23,13 +23,18 @@ class HomeAssistantConfigTests(unittest.TestCase):
             {"discovery_prefix": "homeassistant/#"},
             {"state_directory": "/tmp/../etc"},
             {"photos": {"archive_root": "relative"}},
-            {"mqtt": {"password": "never-inline"}},
+            {"mqtt": {"password": "example-only-password"}},
             {"mqtt": {"host": "mqtt://host"}},
             {"mqtt": {"host": "host\nline"}},
             {"mqtt": {"tls": "false"}},
             {"mqtt": {"port": True}},
             {"mqtt": {"timeout_seconds": 1000}},
             {"telemetry": {"minimum_battery_voltage_mv": 1000}},
+            {"controls": {"timelapse_config": "relative"}},
+            {"controls": {"poll_seconds": True}},
+            {"controls": {"poll_seconds": 0}},
+            {"controls": {"poll_seconds": 11}},
+            {"mqtt": {"timeout_seconds": 3}, "controls": {"poll_seconds": 3}},
         ):
             with self.subTest(overrides=overrides):
                 with self.assertRaises(ValueError):

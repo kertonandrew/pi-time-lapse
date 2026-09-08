@@ -2,6 +2,7 @@ import json
 import unittest
 
 from timelapse.ha_discovery import SENSORS, build_discovery, topics
+from timelapse.ha_controls import FIELDS, INTEGER_LIMITS, RESOLUTIONS
 
 
 class DiscoveryTests(unittest.TestCase):
@@ -14,6 +15,7 @@ class DiscoveryTests(unittest.TestCase):
         self.assertEqual(
             set(components),
             set(SENSORS)
+            | {f"control_{field}" for field in FIELDS}
             | {"latest_photo", "last_uploaded_capture", "publisher_connection"},
         )
         self.assertEqual(
@@ -22,6 +24,34 @@ class DiscoveryTests(unittest.TestCase):
         renamed = build_discovery("garden_01", "Renamed camera")[1]
         self.assertEqual(components, renamed["components"])
         json.dumps(payload, allow_nan=False)
+
+    def test_controls_use_exact_retained_desired_topics_and_nonoptimistic_readback(
+        self,
+    ):
+        components = build_discovery("garden_01", "Garden camera")[1]["components"]
+        for field in FIELDS:
+            component = components[f"control_{field}"]
+            self.assertEqual(
+                component["command_topic"], f"pi_timelapse/garden_01/desired/{field}"
+            )
+            self.assertEqual(
+                component["state_topic"], f"pi_timelapse/garden_01/reported/{field}"
+            )
+            self.assertFalse(component["optimistic"])
+            self.assertTrue(component["retain"])
+            self.assertEqual(component["qos"], 1)
+            self.assertEqual(component["entity_category"], "config")
+            self.assertNotIn("availability_topic", component)
+            if field in INTEGER_LIMITS:
+                self.assertEqual(component["platform"], "number")
+                self.assertEqual(
+                    (component["min"], component["max"]), INTEGER_LIMITS[field]
+                )
+                self.assertEqual(component["command_template"], "{{ value | int }}")
+        self.assertEqual(components["control_resolution"]["options"], list(RESOLUTIONS))
+        self.assertEqual(components["control_rotation"]["options"], ["0", "180"])
+        self.assertEqual(components["control_capture_enabled"]["payload_on"], "true")
+        self.assertEqual(components["control_capture_enabled"]["payload_off"], "false")
 
     def test_each_live_metric_expires_without_publisher_availability(self):
         payload = build_discovery("camera", "Camera", expire_after=600)[1]

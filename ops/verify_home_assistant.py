@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 import secrets
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -305,6 +306,218 @@ def verify_reconnect():
     return {"broker_restart_recovery": True, "recovered_state": "3.97"}
 
 
+def controls_fixture(root):
+    from timelapse.ha_config import validate_config
+    from timelapse.ha_metrics import NUMERIC_FIELDS
+    from timelapse.spool import Spool
+
+    camera_path = root / "camera.json"
+    camera_path.write_text(
+        json.dumps(
+            {
+                "remote_controls": {
+                    "enabled": True,
+                    "device_id": DEVICE,
+                    "state_path": str(root / "controls/settings.json"),
+                }
+            }
+        )
+    )
+    row = {value[0]: 0 for value in NUMERIC_FIELDS.values()}
+    row.update(
+        session_id="synthetic-controls-session",
+        sample_index=1,
+        timestamp_utc=datetime.now(timezone.utc).isoformat(),
+        uptime_seconds=float(Path("/proc/uptime").read_text().split()[0]),
+        boot_id=Path("/proc/sys/kernel/random/boot_id").read_text().strip(),
+        time_source="NTP",
+        battery_present=1,
+        battery_status="NORMAL",
+        power_input_status="PRESENT",
+        power_5v_io_status="NOT_PRESENT",
+        battery_voltage_mv=3970,
+        errors_json="{}",
+    )
+    database = root / "metrics.sqlite3"
+    with sqlite3.connect(database) as connection:
+        columns = ",".join(
+            f"{key} {'TEXT' if isinstance(value, str) else 'REAL' if isinstance(value, float) else 'INTEGER'}"
+            for key, value in row.items()
+        )
+        connection.execute(f"CREATE TABLE samples ({columns})")
+        connection.execute(
+            f"INSERT INTO samples ({','.join(row)}) VALUES ({','.join('?' for _ in row)})",
+            tuple(row.values()),
+        )
+    Spool(root / "spool")
+    return validate_config(
+        {
+            "device_id": DEVICE,
+            "device_name": "Acceptance Camera",
+            "mqtt": {"host": "mqtt", "port": 1883, "tls": False},
+            "telemetry": {"database": str(database), "spool": str(root / "spool")},
+            "controls": {"timelapse_config": str(camera_path), "poll_seconds": 1},
+        }
+    )
+
+
+def verify_controls():
+    from timelapse.config import effective_config, load_config
+    from timelapse.ha import run_controls
+
+    entities = {
+        "capture_enabled": "switch.acceptance_camera_capture_enabled",
+        "interval_seconds": "number.acceptance_camera_capture_interval",
+        "resolution": "select.acceptance_camera_capture_resolution",
+        "jpeg_quality": "number.acceptance_camera_jpeg_quality",
+        "rotation": "select.acceptance_camera_capture_rotation",
+        "settle_ms": "number.acceptance_camera_camera_settling_time",
+    }
+
+    def reported():
+        observed = states()
+        result = {
+            field: observed[entity]["state"] for field, entity in entities.items()
+        }
+        for field in ("interval_seconds", "jpeg_quality", "settle_ms"):
+            result[field] = int(float(result[field]))
+        result["capture_enabled"] = result["capture_enabled"] == "on"
+        result["rotation"] = int(result["rotation"])
+        return result
+
+    with tempfile.TemporaryDirectory(prefix="camera-controls-") as directory:
+        root = Path(directory)
+        config = controls_fixture(root)
+        local = load_config(config["controls"]["timelapse_config"])
+        path = Path(local["remote_controls"]["state_path"])
+        preview = run_controls(config, dry_run=True)
+        if preview["action"] != "preview" or path.exists():
+            raise AssertionError("Controls preview wrote configuration")
+        initial = run_controls(config)["settings"]
+        wait_for(lambda: reported() == initial)
+        changes = {
+            "capture_enabled": True,
+            "interval_seconds": 600,
+            "resolution": "1920x1080",
+            "jpeg_quality": 75,
+            "rotation": 180,
+            "settle_ms": 1500,
+        }
+        before = path.read_bytes()
+        for field, value in changes.items():
+            entity = entities[field]
+            domain = entity.split(".")[0]
+            service = (
+                "turn_on"
+                if domain == "switch"
+                else "select_option"
+                if domain == "select"
+                else "set_value"
+            )
+            data = {"entity_id": entity}
+            if domain != "switch":
+                data["option" if domain == "select" else "value"] = (
+                    str(value) if domain == "select" else value
+                )
+            request(f"/api/services/{domain}/{service}", data)
+        time.sleep(1)
+        if path.read_bytes() != before or reported() != initial:
+            raise AssertionError(
+                "Offline desired configuration was optimistically applied"
+            )
+        applied = run_controls(config)
+        if applied["settings"] != changes:
+            raise AssertionError(
+                "Bounded controls poll did not apply all retained desired settings"
+            )
+        wait_for(lambda: reported() == changes)
+        snapshot = effective_config(local)
+        if (
+            snapshot["camera"]["width"] != 1920
+            or snapshot["camera"]["height"] != 1080
+            or snapshot["camera"]["quality"] != 75
+            or snapshot["camera"]["rotation"] != 180
+            or snapshot["camera"]["settle_ms"] != 1500
+            or snapshot["schedule"] != {"enabled": True, "interval_seconds": 600}
+            or snapshot["power"] != local["power"]
+            or snapshot["server"] != local["server"]
+            or snapshot["camera"]["camera_command"] != local["camera"]["camera_command"]
+        ):
+            raise AssertionError(
+                "Effective capture configuration differs from durable reported settings"
+            )
+        before = path.read_bytes()
+        inode = path.stat().st_ino
+        request(
+            "/api/services/mqtt/publish",
+            {
+                "topic": f"pi_timelapse/{DEVICE}/desired/interval_seconds",
+                "payload": "NaN",
+                "retain": True,
+                "qos": 1,
+            },
+        )
+        try:
+            run_controls(config)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("Malformed retained control was accepted")
+        if path.read_bytes() != before or reported() != changes:
+            raise AssertionError("Malformed control changed settings or reported state")
+        request(
+            "/api/services/mqtt/publish",
+            {
+                "topic": f"pi_timelapse/{DEVICE}/desired/interval_seconds",
+                "payload": "600",
+                "retain": True,
+                "qos": 1,
+            },
+        )
+        replay = run_controls(config)
+        if replay["changed_fields"] or path.stat().st_ino != inode:
+            raise AssertionError(
+                "Retained configuration replay rewrote durable settings"
+            )
+        request(
+            "/api/services/switch/turn_off", {"entity_id": entities["capture_enabled"]}
+        )
+        request(
+            "/api/services/select/select_option",
+            {"entity_id": entities["resolution"], "option": "configured"},
+        )
+        final = run_controls(config)["settings"]
+        wait_for(lambda: reported() == final)
+        snapshot = effective_config(local)
+        if snapshot["schedule"]["enabled"] or (
+            snapshot["camera"]["width"],
+            snapshot["camera"]["height"],
+        ) != (local["camera"]["width"], local["camera"]["height"]):
+            raise AssertionError(
+                "Disable or configured resolution did not reach effective capture settings"
+            )
+        return {
+            "camera_controls": {
+                "native_entity_ids": entities,
+                "native_service_calls": [
+                    "switch.turn_on",
+                    "switch.turn_off",
+                    "number.set_value",
+                    "select.select_option",
+                ],
+                "retained_desires_survive_device_offline": True,
+                "nonoptimistic_before_durable_readback": True,
+                "reported_settings_match_effective_capture_config": True,
+                "malformed_retained_control_rejected_without_change": True,
+                "retained_replay_avoids_state_rewrite": True,
+                "configured_resolution_and_disable_applied": True,
+                "reported_final_settings": final,
+                "telemetry_boundary": "synthetic SQLite row with current container boot and uptime; production reader and guard; no hardware calls or mocks",
+                "physical_capture_or_scheduler_execution": False,
+            }
+        }
+
+
 def docker(*arguments):
     return subprocess.run(
         ["docker", *arguments], check=True, capture_output=True, text=True
@@ -355,8 +568,8 @@ def acceptance(output):
     report = {
         "recorded_at_utc": datetime.now(timezone.utc).isoformat(),
         "scope": "isolated official containers and synthetic data only",
-        "source_root": str(source_root),
-        "temporary_directory": str(root),
+        "source_root": ".",
+        "temporary_directory": "ephemeral test workspace",
         "network_is_internal": True,
         "host_port_bindings": ["127.0.0.1:18123", "127.0.0.1:18884"],
         "mqtt_transport": "plaintext anonymous on isolated test network",
@@ -366,7 +579,17 @@ def acceptance(output):
             f"timelapse/{name}": hashlib.sha256(
                 (project / "timelapse" / name).read_bytes()
             ).hexdigest()
-            for name in ("ha_discovery.py", "ha_mqtt.py", "ha_photos.py", "receiver.py")
+            for name in (
+                "ha.py",
+                "ha_config.py",
+                "ha_controls.py",
+                "ha_discovery.py",
+                "ha_metrics.py",
+                "ha_mqtt.py",
+                "ha_photos.py",
+                "receiver.py",
+                "config.py",
+            )
         },
     }
     try:
@@ -402,12 +625,11 @@ def acceptance(output):
         report.update(container_phase(ha, "initial"))
         docker("restart", broker)
         report.update(container_phase(ha, "reconnect"))
+        report.update(container_phase(ha, "controls"))
         report["completed"] = True
     except Exception as error:
         report["completed"] = False
         report["failure_type"] = type(error).__name__
-        if isinstance(error, subprocess.CalledProcessError) and error.stderr:
-            report["failure_last_line"] = error.stderr.splitlines()[-1][:300]
         raise
     finally:
         cleanup = []
@@ -417,9 +639,9 @@ def acceptance(output):
                     docker("rm", "-f", name)
                 else:
                     docker("network", "rm", name)
-                cleanup.append({"kind": kind, "name": name, "removed": True})
+                cleanup.append({"kind": kind, "removed": True})
             except subprocess.CalledProcessError:
-                cleanup.append({"kind": kind, "name": name, "removed": False})
+                cleanup.append({"kind": kind, "removed": False})
         report["cleanup"] = cleanup
         output.write_text(json.dumps(report, indent=2) + "\n")
     print(json.dumps({"report": str(output), "completed": report["completed"]}))
@@ -429,7 +651,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run", action="store_true")
     parser.add_argument("--output", type=Path)
-    parser.add_argument("--inside", choices=("bootstrap", "initial", "reconnect"))
+    parser.add_argument(
+        "--inside", choices=("bootstrap", "initial", "reconnect", "controls")
+    )
     args = parser.parse_args()
     if args.inside:
         sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -437,6 +661,7 @@ def main():
             "bootstrap": bootstrap,
             "initial": verify_initial,
             "reconnect": verify_reconnect,
+            "controls": verify_controls,
         }[args.inside]
         print(json.dumps(action()))
     elif args.run and args.output:

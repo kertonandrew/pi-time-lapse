@@ -1,5 +1,7 @@
 import re
 
+from .ha_controls import FIELDS, INTEGER_LIMITS, RESOLUTIONS
+
 
 IDENTIFIER = re.compile(r"[A-Za-z0-9_-]{1,64}\Z")
 PREFIX = re.compile(r"[A-Za-z0-9_-]+(?:/[A-Za-z0-9_-]+)*\Z")
@@ -59,7 +61,14 @@ def topics(device_id, topic_prefix="pi_timelapse", discovery_prefix="homeassista
         "discovery": f"{discovery_prefix}/device/{device_id}/config",
         **{
             name: f"{base}/{name}"
-            for name in ("state", "image", "image_metadata", "connection")
+            for name in (
+                "state",
+                "image",
+                "image_metadata",
+                "connection",
+                "desired",
+                "reported",
+            )
         },
     }
 
@@ -137,6 +146,47 @@ def build_discovery(
         "enabled_by_default": False,
         "qos": 1,
     }
+    names = {
+        "capture_enabled": "Capture enabled",
+        "interval_seconds": "Capture interval",
+        "resolution": "Capture resolution",
+        "jpeg_quality": "JPEG quality",
+        "rotation": "Capture rotation",
+        "settle_ms": "Camera settling time",
+    }
+    for field in FIELDS:
+        component = {
+            "name": names[field],
+            "unique_id": f"pi_timelapse_{device_id}_control_{field}",
+            "command_topic": f"{destination['desired']}/{field}",
+            "state_topic": f"{destination['reported']}/{field}",
+            "optimistic": False,
+            "retain": True,
+            "qos": 1,
+            "entity_category": "config",
+        }
+        if field == "capture_enabled":
+            component.update(platform="switch", payload_on="true", payload_off="false")
+        elif field in ("resolution", "rotation"):
+            component.update(
+                platform="select",
+                options=list(RESOLUTIONS) if field == "resolution" else ["0", "180"],
+            )
+        else:
+            minimum, maximum = INTEGER_LIMITS[field]
+            component.update(
+                platform="number",
+                min=minimum,
+                max=maximum,
+                step=1,
+                mode="box",
+                command_template="{{ value | int }}",
+            )
+            if field in ("interval_seconds", "settle_ms"):
+                component["unit_of_measurement"] = (
+                    "s" if field == "interval_seconds" else "ms"
+                )
+        components[f"control_{field}"] = component
     return destination["discovery"], {
         "device": {
             "identifiers": [f"pi_timelapse_{device_id}"],

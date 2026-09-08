@@ -1,19 +1,23 @@
 [Unit]
-Description=Publish a bounded timelapse metrics snapshot to Home Assistant
+Description=Apply validated Home Assistant camera configuration
 After=network.target pi-hardware.service
 ConditionPathExists=/etc/pi-home-assistant/config.json
+ConditionPathExists=/etc/pi-timelapse.json
 
 [Service]
 Type=oneshot
 WorkingDirectory=/opt/pi-home-assistant
-ExecStart=/opt/pi-home-assistant/.venv/bin/python -I -m timelapse.ha --config /etc/pi-home-assistant/config.json telemetry
-StateDirectory=pi-home-assistant
+ExecStart=/opt/pi-home-assistant/.venv/bin/python -I -m timelapse.ha --config /etc/pi-home-assistant/config.json controls
+StateDirectory=pi-home-assistant pi-timelapse-controls
 StateDirectoryMode=0700
 UMask=0077
 Nice=10
 IOSchedulingClass=idle
 TimeoutStartSec=40
 KillMode=control-group
+MemoryMax=64M
+TasksMax=16
+LimitNOFILE=64
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
@@ -22,4 +26,4 @@ ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectControlGroups=true
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
-ReadWritePaths=/var/lib/pi-home-assistant
+ReadWritePaths=/var/lib/pi-home-assistant /var/lib/pi-timelapse-controls
