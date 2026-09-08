@@ -1,4 +1,4 @@
-"""Run a bounded, externally powered capture experiment with charging disabled."""
+"""Run a bounded capture experiment with battery fallback and charging disabled."""
 
 import argparse
 import fcntl
@@ -20,8 +20,9 @@ from timelapse.spool import Spool, fsync_directory
 MAX_SAMPLES = 512
 MAX_RECORD_BYTES = 1048576
 MAX_GAP_SECONDS = 2.5
+USB_STATES = ("PRESENT", "WEAK", "BAD", "NOT_PRESENT")
 LIMITATIONS = [
-    "Supervised external-power trial; the battery profile remains unverified.",
+    "Supervised battery-fallback trial; the battery profile remains unverified.",
     "HAT-to-Pi rail energy is provisional and excludes PiJuice conversion losses.",
     "Battery current is a firmware estimate, not calibrated battery energy.",
     "Controller USB input watts, solar watts and efficiency are unavailable.",
@@ -119,8 +120,8 @@ def guard(sample):
     status, charging = sample.get("status"), sample.get("charging")
     if not isinstance(status, dict) or not isinstance(charging, dict):
         raise TrialRejected("Live status or charging configuration is missing")
-    if status.get("powerInput") != "PRESENT":
-        raise TrialRejected("PiJuice USB input is not PRESENT")
+    if status.get("powerInput") not in USB_STATES:
+        raise TrialRejected("PiJuice USB input state is unknown")
     if status.get("powerInput5vIo") != "NOT_PRESENT":
         raise TrialRejected("A direct Pi/GPIO supply is present or unknown")
     if charging.get("charging_enabled") is not False:
@@ -133,6 +134,8 @@ def guard(sample):
             raise TrialRejected(
                 "Battery voltage is outside the 3.80–4.25 V trial reserve"
             )
+    elif status["powerInput"] != "PRESENT":
+        raise TrialRejected("Without a battery, PiJuice USB input must be PRESENT")
     if not finite(sample.get("io_power_w")) or sample["io_power_w"] < 0:
         raise TrialRejected("HAT-to-Pi power is missing or reversed")
     voltage = sample.get("io_voltage_mv")
@@ -246,6 +249,10 @@ def summarize(samples, baseline_start, capture_start, capture_end, post_end):
     ):
         return dict(invalid, reason="Samples do not cover all measurement intervals")
     for sample in samples:
+        try:
+            guard(sample)
+        except TrialRejected as error:
+            return dict(invalid, reason=str(error))
         if (
             sample.get("errors")
             or sample.get("source_and_battery_valid") is not True
@@ -254,6 +261,17 @@ def summarize(samples, baseline_start, capture_start, capture_end, post_end):
             or sample["read_duration_seconds"] > MAX_GAP_SECONDS
         ):
             return dict(invalid, reason="Source, battery or sensor validity was lost")
+    source_states = sorted({sample["status"]["powerInput"] for sample in samples})
+    source = {
+        "usb_source_state": source_states[0] if len(source_states) == 1 else "MIXED",
+        "usb_source_states": source_states,
+    }
+    if len(source_states) != 1:
+        return dict(
+            invalid,
+            **source,
+            reason="USB source state changed during the measurement window",
+        )
     if any(
         not 0
         < right["monotonic_seconds"] - left["monotonic_seconds"]
@@ -272,6 +290,7 @@ def summarize(samples, baseline_start, capture_start, capture_end, post_end):
     return {
         "valid": True,
         "provisional": True,
+        **source,
         "pre_idle_mean_w": pre_w,
         "post_idle_mean_w": post_w,
         "baseline_mean_w": baseline_w,
@@ -301,9 +320,7 @@ def execute_attempt(record, options, device, config, capture_fn=capture):
         before_capture = sampler.snapshot()
         guard(before_capture)
         if any(not sample["source_and_battery_valid"] for sample in sampler.samples):
-            raise TrialRejected(
-                "The external supply was not stable throughout baseline"
-            )
+            raise TrialRejected("Hardware validity was lost during the baseline")
         if (
             utc_now() + timedelta(seconds=options.baseline_seconds + 50)
             >= options.deadline
@@ -364,7 +381,8 @@ def run_trial(options, device_factory=None, capture_fn=capture):
         if path.exists():
             raise RuntimeError("Trial attempt records are not contiguous")
         record = {
-            "mode": "supervised_external_power_capture_trial",
+            "mode": "supervised_battery_fallback_capture_trial",
+            "policy_revision": 2,
             "status": "started",
             "attempt": attempt,
             "started_at_utc": utc_now().isoformat(),

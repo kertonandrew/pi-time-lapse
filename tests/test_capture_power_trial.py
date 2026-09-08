@@ -59,8 +59,7 @@ class GuardTests(unittest.TestCase):
 
     def test_unsafe_or_unknown_states_are_rejected(self):
         cases = [
-            ("status", "powerInput", "BAD"),
-            ("status", "powerInput", "NOT_PRESENT"),
+            ("status", "powerInput", "UNKNOWN"),
             ("status", "powerInput", None),
             ("status", "powerInput5vIo", "PRESENT"),
             ("status", "powerInput5vIo", None),
@@ -88,6 +87,21 @@ class GuardTests(unittest.TestCase):
             trial.guard(dict(sample(), errors=["I2C failed"]))
         with self.assertRaises(trial.TrialRejected):
             trial.guard(dict(sample(), errors=None))
+
+    def test_battery_fallback_needs_reserve_and_known_usb_state(self):
+        for state in trial.USB_STATES:
+            with self.subTest(state=state):
+                row = sample()
+                row["status"]["powerInput"] = state
+                trial.guard(row)
+                row["status"]["battery"] = "NOT_PRESENT"
+                if state == "PRESENT":
+                    trial.guard(row)
+                else:
+                    with self.assertRaisesRegex(
+                        trial.TrialRejected, "Without a battery"
+                    ):
+                        trial.guard(row)
 
     def test_live_sample_preserves_raw_readings_and_signed_battery_estimate(self):
         hardware = device()
@@ -122,6 +136,19 @@ class EnergyTests(unittest.TestCase):
         self.assertAlmostEqual(result["capture_total_wh"], 10 / 3600)
         self.assertAlmostEqual(result["capture_incremental_wh"], 6 / 3600)
         self.assertAlmostEqual(result["total_window_wh"], 16 / 3600)
+        self.assertEqual(result["usb_source_state"], "PRESENT")
+
+    def test_stable_battery_fallback_energy_is_classified_by_usb_state(self):
+        for state in ("BAD", "WEAK", "NOT_PRESENT"):
+            with self.subTest(state=state):
+                rows = self.rows()
+                for row in rows:
+                    row["status"]["powerInput"] = state
+                result = trial.summarize(rows, 0, 3, 7, 10)
+                self.assertTrue(result["valid"])
+                self.assertEqual(result["usb_source_state"], state)
+                self.assertEqual(result["usb_source_states"], [state])
+                self.assertAlmostEqual(result["capture_incremental_wh"], 6 / 3600)
 
     def test_negative_incremental_energy_is_preserved(self):
         result = trial.summarize(self.rows(during=0.5), 0, 3, 7, 10)
@@ -176,6 +203,8 @@ class TrialTests(unittest.TestCase):
         saved = json.loads(Path(result["record"]).read_text())
         self.assertEqual(saved["attempt"], 1)
         self.assertEqual(saved["status"], "rejected")
+        self.assertEqual(saved["mode"], "supervised_battery_fallback_capture_trial")
+        self.assertEqual(saved["policy_revision"], 2)
 
     def test_six_rejections_exhaust_trial_and_seventh_writes_nothing(self):
         self.options.deadline = NOW - timedelta(seconds=1)
@@ -243,9 +272,10 @@ class TrialTests(unittest.TestCase):
         self.assertEqual(camera.call_args.kwargs["lock_timeout_seconds"], 3)
         sampler.stop.assert_called_once()
 
-    def test_source_failure_after_baseline_prevents_camera(self):
+    def test_battery_reserve_failure_after_baseline_prevents_camera(self):
         good, bad = sample(0), sample(20)
         bad["status"]["powerInput"] = "BAD"
+        bad["battery_voltage_mv"] = 3799
         bad["source_and_battery_valid"] = False
         sampler = Mock(samples=[good, bad], failure=None, abort_reason=None)
         sampler.snapshot.side_effect = [good, bad]
@@ -261,6 +291,60 @@ class TrialTests(unittest.TestCase):
                 trial.execute_attempt(record, self.options, device(), DEFAULTS, camera)
         camera.assert_not_called()
         self.assertEqual(record["samples"], [good, bad])
+
+    def test_bad_usb_captures_and_source_transition_only_invalidates_energy(self):
+        for initial_state in ("BAD", "PRESENT"):
+            with self.subTest(initial_state=initial_state):
+                rows = [sample(t, 3 if 4 <= t <= 6 else 1) for t in range(11)]
+                for row in rows:
+                    row["status"]["powerInput"] = (
+                        initial_state if row["monotonic_seconds"] < 3 else "BAD"
+                    )
+                sampler = Mock(samples=rows, failure=None, abort_reason=None)
+                sampler.snapshot.side_effect = [rows[0], rows[3], rows[10]]
+                config = copy.deepcopy(DEFAULTS)
+                config["spool"] = str(self.root / "spool")
+                config["min_free_bytes"] = 0
+                camera = Mock(return_value={"filename": "photo.jpg"})
+                record = {"time_source": "UNSYNC"}
+                with (
+                    patch.object(trial, "read_sample", return_value=rows[0]),
+                    patch.object(trial, "Sampler", return_value=sampler),
+                    patch.object(trial, "utc_now", return_value=NOW),
+                    patch.object(trial.time, "sleep"),
+                    patch.object(trial.time, "monotonic", side_effect=[3, 7]),
+                ):
+                    trial.execute_attempt(
+                        record, self.options, device(), config, camera
+                    )
+                camera.assert_called_once()
+                self.assertEqual(record["status"], "captured")
+                self.assertEqual(record["samples"], rows)
+                if initial_state == "BAD":
+                    self.assertTrue(record["energy"]["valid"])
+                    self.assertEqual(record["energy"]["usb_source_state"], "BAD")
+                else:
+                    self.assertFalse(record["energy"]["valid"])
+                    self.assertEqual(record["energy"]["usb_source_state"], "MIXED")
+                    self.assertEqual(
+                        record["energy"]["usb_source_states"], ["BAD", "PRESENT"]
+                    )
+                    self.assertIn("source state changed", record["energy"]["reason"])
+                    self.assertNotIn("capture_incremental_wh", record["energy"])
+
+    def test_source_changes_do_not_cancel_until_battery_reserve_is_lost(self):
+        sampler = trial.Sampler(None, 1)
+        sampler.samples = [sample(1)]
+        with patch.object(trial.time, "monotonic", return_value=2):
+            bad = sample(2)
+            bad["status"]["powerInput"] = "BAD"
+            sampler.samples.append(bad)
+            self.assertFalse(sampler.cancelled())
+            bad["battery_voltage_mv"] = 3799
+            self.assertTrue(sampler.cancelled())
+            bad["battery_voltage_mv"] = 4000
+            self.assertTrue(sampler.cancelled())
+        self.assertIn("trial reserve", sampler.abort_reason)
 
     def test_all_background_device_reads_use_one_worker_thread(self):
         threads = []
