@@ -24,9 +24,14 @@ sudo /opt/pi-timelapse-receiver/bin/python3 -I -m timelapse.ssh_gateway --help
 
 The virtual environment, interpreter, installed package, and their parent
 directories must be root-owned and not writable by the ingest account or other
-unprivileged users. Install updated distro rsync and OpenSSH security packages.
-The gateway needs Linux `/proc/self/fd` and POSIX resource limits. The tested
-rsync server is 3.4.1; Apple's openrsync is not this server profile.
+unprivileged users. Install updated distro OpenSSH security packages. Both the
+camera and receiver need rsync 3.5.0 or a vendor package with the applicable
+[rsync security fixes](https://rsync.samba.org/security.html) backported. Check the
+vendor advisory against the full installed package revision.
+
+The gateway needs Linux `/proc/self/fd` and POSIX resource limits. The recorded
+compatibility test used rsync 3.4.1; rerun the receiver acceptance checks with the
+patched package before deployment. Apple's openrsync is not this server profile.
 
 Unlike the older standalone `receiver.py` installation, this setup needs the
 complete installed `timelapse` package. Both gateway and receiver use isolated
@@ -105,6 +110,7 @@ Match User timelapse_camera01
     AuthorizedKeysFile /etc/ssh/pi-timelapse-keys/%u
     ForceCommand /opt/pi-timelapse-receiver/bin/python3 -I -m timelapse.ssh_gateway --config /etc/pi-timelapse-receiver/camera01.json
     DisableForwarding yes
+    PermitTunnel no
     PermitTTY no
     PermitUserRC no
     MaxSessions 1
@@ -116,6 +122,10 @@ before reloading SSH. Keep an existing administrator connection open while
 verifying the new configuration. A server-wide forced command also constrains
 future keys or certificates accepted for that user; a key prefix alone constrains
 only that particular key.
+
+Keep `PermitTunnel no` explicit: older OpenSSH versions do not consistently apply
+`restrict` or `DisableForwarding` to tunnel forwarding. See the
+[OpenSSH 10.5 security fixes](https://www.openssh.org/txt/release-10.5).
 
 An equivalent `command="/opt/pi-timelapse-receiver/bin/python3 -I -m timelapse.ssh_gateway --config /etc/pi-timelapse-receiver/camera01.json"`
 can be combined with `restrict` on an individual key when server configuration
