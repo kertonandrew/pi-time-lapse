@@ -1,13 +1,16 @@
 import json
+import fcntl
+import signal
 import subprocess
 import tempfile
 import unittest
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, call, patch
 
-from timelapse.capture import CaptureError, capture
+from timelapse.capture import CaptureError, capture, run_cancellable
 from timelapse.spool import CapacityError, MAX_IMAGE_BYTES, Spool
 
 
@@ -180,6 +183,85 @@ class CaptureTests(unittest.TestCase):
                 camera_command=str(Path(self.directory.name) / "does-not-exist"),
             )
         self.assertEqual(self.spool.list_pending(), [])
+
+    def test_cancelled_capture_never_starts_camera(self):
+        with patch("timelapse.capture.subprocess.Popen") as start:
+            with self.assertRaisesRegex(CaptureError, "cancelled"):
+                capture(self.spool, cancelled=lambda: True)
+        start.assert_not_called()
+        self.assertEqual(self.spool.list_pending(), [])
+        self.assertEqual(list(self.spool.images.glob(".*.part")), [])
+
+    def test_power_loss_terminates_and_reaps_running_camera(self):
+        executable = Path(self.directory.name) / "slow-camera"
+        executable.write_text("#!/bin/sh\nexec sleep 10\n")
+        executable.chmod(0o700)
+        started = time.monotonic()
+        processes = []
+        original_popen = subprocess.Popen
+
+        def start(*args, **kwargs):
+            process = original_popen(*args, **kwargs)
+            processes.append(process)
+            return process
+
+        with patch("timelapse.capture.subprocess.Popen", side_effect=start):
+            with self.assertRaisesRegex(CaptureError, "cancelled"):
+                capture(
+                    self.spool,
+                    camera_command=str(executable),
+                    cancelled=lambda: time.monotonic() - started > 0.1,
+                    lock_timeout_seconds=0.5,
+                )
+        self.assertLess(time.monotonic() - started, 3)
+        self.assertEqual(len(processes), 1)
+        self.assertIsNotNone(processes[0].returncode)
+        self.assertEqual(self.spool.list_pending(), [])
+        self.assertEqual(list(self.spool.images.glob(".*.part")), [])
+
+    def test_cancellable_camera_timeout_still_reaps_child(self):
+        executable = Path(self.directory.name) / "slow-camera"
+        executable.write_text("#!/bin/sh\nexec sleep 10\n")
+        executable.chmod(0o700)
+        with self.assertRaisesRegex(CaptureError, "exceeded"):
+            capture(
+                self.spool,
+                camera_command=str(executable),
+                timeout_seconds=0.05,
+                cancelled=lambda: False,
+            )
+        self.assertEqual(self.spool.list_pending(), [])
+        self.assertEqual(list(self.spool.images.glob(".*.part")), [])
+
+    def test_unresponsive_cancelled_camera_is_killed_after_termination_timeout(self):
+        process = Mock(pid=1234)
+        process.poll.return_value = None
+        process.wait.side_effect = [subprocess.TimeoutExpired("camera", 1), -9]
+        with (
+            patch("timelapse.capture.subprocess.Popen", return_value=process),
+            patch("timelapse.capture.os.killpg") as kill_group,
+        ):
+            with self.assertRaisesRegex(CaptureError, "cancelled"):
+                run_cancellable(["camera"], None, 45, Mock(side_effect=[False, True]))
+        self.assertEqual(
+            kill_group.call_args_list,
+            [call(1234, signal.SIGTERM), call(1234, signal.SIGKILL)],
+        )
+        self.assertEqual(
+            process.wait.call_args_list, [call(timeout=1), call(timeout=2)]
+        )
+
+    def test_trial_spool_lock_wait_is_bounded(self):
+        with (self.spool.root / ".spool.lock").open("a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            with patch("timelapse.capture.subprocess.Popen") as start:
+                with self.assertRaisesRegex(TimeoutError, "Spool lock"):
+                    capture(
+                        self.spool,
+                        cancelled=lambda: False,
+                        lock_timeout_seconds=0.05,
+                    )
+        start.assert_not_called()
 
 
 if __name__ == "__main__":

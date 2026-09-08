@@ -1,4 +1,5 @@
 import os
+import signal
 import stat
 import subprocess
 import tempfile
@@ -28,6 +29,46 @@ def boot_id() -> str:
         return "unknown"
 
 
+def run_cancellable(command, errors, timeout_seconds, cancelled):
+    if cancelled():
+        raise CaptureError("Camera capture cancelled by its power guard")
+    process = subprocess.Popen(
+        command,
+        stdout=subprocess.DEVNULL,
+        stderr=errors,
+        start_new_session=True,
+    )
+    deadline = time.monotonic() + timeout_seconds
+    try:
+        while True:
+            if cancelled():
+                raise CaptureError("Camera capture cancelled by its power guard")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise CaptureError(
+                    f"Camera capture exceeded {timeout_seconds:g} seconds"
+                )
+            try:
+                process.wait(timeout=min(0.2, remaining))
+                return process
+            except subprocess.TimeoutExpired:
+                pass
+    finally:
+        if process.poll() is None:
+            try:
+                os.killpg(process.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            try:
+                process.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                process.wait(timeout=2)
+
+
 def capture(
     spool: Spool,
     camera_command: str = "rpicam-still",
@@ -37,6 +78,8 @@ def capture(
     height: int = 2592,
     rotation: int = 180,
     time_source: str = "UNSYNC",
+    cancelled=None,
+    lock_timeout_seconds=None,
 ) -> dict:
     if (
         not isinstance(camera_command, str)
@@ -57,7 +100,11 @@ def capture(
         raise ValueError("rotation must be 0 or 180 degrees")
     if time_source not in {"NTP", "RTC", "UNSYNC"}:
         raise ValueError("time_source must be NTP, RTC, or UNSYNC")
-    with spool.lock():
+    if cancelled is not None and not callable(cancelled):
+        raise ValueError("cancelled must be callable or None")
+    if cancelled is not None and cancelled():
+        raise CaptureError("Camera capture cancelled by its power guard")
+    with spool.lock(timeout_seconds=lock_timeout_seconds):
         spool._recover()
         spool.check_capacity(MAX_IMAGE_BYTES + 2 * MAX_RECORD_BYTES)
         timestamp = datetime.now(timezone.utc)
@@ -88,13 +135,18 @@ def capture(
             ]
             with tempfile.TemporaryFile() as errors:
                 try:
-                    process = subprocess.run(
-                        command,
-                        stdout=subprocess.DEVNULL,
-                        stderr=errors,
-                        timeout=timeout_seconds,
-                        check=False,
-                    )
+                    if cancelled is None:
+                        process = subprocess.run(
+                            command,
+                            stdout=subprocess.DEVNULL,
+                            stderr=errors,
+                            timeout=timeout_seconds,
+                            check=False,
+                        )
+                    else:
+                        process = run_cancellable(
+                            command, errors, timeout_seconds, cancelled
+                        )
                 except subprocess.TimeoutExpired as error:
                     raise CaptureError(
                         f"Camera capture exceeded {timeout_seconds:g} seconds"
@@ -108,6 +160,8 @@ def capture(
                     raise CaptureError(
                         f"Camera exited with status {process.returncode}: {detail}"
                     )
+            if cancelled is not None and cancelled():
+                raise CaptureError("Camera capture cancelled by its power guard")
             duration = time.monotonic() - started
             descriptor = os.open(temporary, os.O_RDONLY | os.O_NOFOLLOW)
             with os.fdopen(descriptor, "rb") as image:
@@ -136,6 +190,8 @@ def capture(
                 "capture_duration_seconds": duration,
             }
             spool.check_capacity(2 * MAX_RECORD_BYTES)
+            if cancelled is not None and cancelled():
+                raise CaptureError("Camera capture cancelled by its power guard")
             publication_started = True
             return spool.publish(temporary, metadata)
         except (CaptureError, SpoolError):
