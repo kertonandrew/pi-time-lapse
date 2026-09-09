@@ -1,0 +1,17 @@
+[Unit]
+Description=Run one bounded PiJuice battery discharge trial
+After=pijuice.service
+Conflicts=pi-battery-charge-test.service
+
+[Service]
+Type=simple
+User=root
+EnvironmentFile=/etc/default/pi-battery-test
+ExecStart=/usr/bin/python3 -u /usr/local/lib/pi-time-lapse/battery_test.py run --output ${BATTERY_TEST_OUTPUT}
+ExecStopPost=/usr/bin/python3 /usr/local/lib/pi-time-lapse/battery_test.py cleanup --output ${BATTERY_TEST_OUTPUT}
+RuntimeMaxSec=21min
+TimeoutStopSec=20s
+KillMode=control-group
+Restart=no
+Nice=10
+UMask=0077

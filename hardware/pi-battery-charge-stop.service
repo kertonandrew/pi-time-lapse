@@ -1,0 +1,11 @@
+[Unit]
+Description=Stop the charging trial and verify charging is disabled
+
+[Service]
+Type=oneshot
+User=root
+EnvironmentFile=/etc/default/pi-battery-charge-test
+ExecStart=-/usr/bin/systemctl stop pi-battery-charge-test.service
+ExecStart=/usr/bin/python3 /usr/local/lib/pi-time-lapse/charge_test.py stop --output ${BATTERY_CHARGE_OUTPUT}
+TimeoutStartSec=60s
+UMask=0077

@@ -63,8 +63,11 @@ configuration-free archive used by the operator workflow.
 
 Scheduling runs only while Linux is awake. A weak solar input alone does not block
 capture when a qualified battery has sufficient reserve. Missing/stale telemetry
-or an unqualified battery still blocks capture. This package does not adjust the
+or an unqualified battery still blocks capture. The camera application does not adjust the
 charger, program wake alarms, shut down Linux or delete photographs after upload.
+Separate opt-in [discharge](docs/battery-discharge-test.md) and
+[charging](docs/battery-charging-trial.md) diagnostics can control Pi power or the
+charger. The normal installers do not enable these diagnostic units.
 
 ## Development
 

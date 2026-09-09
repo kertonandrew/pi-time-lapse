@@ -1,0 +1,7 @@
+[Unit]
+Description=Bound the provisional PiJuice charging trial
+
+[Timer]
+OnActiveSec=330s
+AccuracySec=1s
+Unit=pi-battery-charge-stop.service
