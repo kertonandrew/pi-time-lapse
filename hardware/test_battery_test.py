@@ -75,13 +75,19 @@ class DischargeGuards(unittest.TestCase):
     def test_no_workload_with_charging_or_ambiguous_power(self):
         with self.assertRaises(TestStopped):
             validate_sample(sample(), ok({"charging_enabled": True}), 40)
-        for source in ["BAD", "WEAK", "unknown"]:
+        for source in ["unknown"]:
             with self.assertRaises(TestStopped):
                 validate_sample(sample(source), ok({"charging_enabled": False}), 40)
         raw = sample()
         raw["GetStatus"]["data"]["powerInput5vIo"] = "PRESENT"
         with self.assertRaises(TestStopped):
             validate_sample(raw, ok({"charging_enabled": False}), 40)
+
+    def test_known_transitional_sources_require_settling(self):
+        for source in ("BAD", "WEAK"):
+            self.assertIsNone(
+                validate_sample(sample(source), ok({"charging_enabled": False}), 40)
+            )
 
     def test_phases_have_bounded_cpu_duration(self):
         self.assertEqual(phase(119.9), "battery_idle")
@@ -302,6 +308,49 @@ class DischargeLifecycle(unittest.TestCase):
         run.launch.assert_called_once()
         self.assertEqual(run.launch.call_args.args[0][:2], ["/usr/bin/timeout", "30"])
         run.stop.assert_called_with(worker)
+
+    def test_unplug_transition_settles_before_battery_workload(self):
+        run = self.run_sequence(
+            [sample("PRESENT"), sample("BAD"), sample("WEAK"), sample(), sample()],
+            [2, 2, 2, 300],
+        )
+        self.assertEqual(run.result, "complete")
+        self.assertTrue(run.saved["battery_test_started"])
+        events = [r for r in run.rows if r.get("event") == "phase"]
+        self.assertEqual(events[0]["monotonic"], 6)
+        self.assertEqual(sum(r.get("usb_input_settling", False) for r in run.rows), 2)
+        run.launch.assert_not_called()
+
+    def test_persistent_transition_stops_after_ten_seconds(self):
+        run = self.run_sequence([sample("BAD")] * 6, [2] * 5)
+        self.assertIn("usb_input_settling_timeout", run.result)
+        self.assertEqual(run.saved["elapsed_seconds"], 10)
+        self.assertFalse(run.saved["battery_test_started"])
+        run.launch.assert_not_called()
+
+    def test_voltage_guard_remains_active_while_settling(self):
+        bad = sample("BAD")
+        bad["GetIoVoltage"] = ok(4700)
+        run = self.run_sequence([sample("BAD"), bad], [2])
+        self.assertIn("pi_rail_voltage_limit", run.result)
+        self.assertEqual(run.saved["elapsed_seconds"], 2)
+
+    def test_transition_stops_cpu_and_usb_return_ends_trial(self):
+        worker = Mock()
+        worker.poll.return_value = None
+        run = self.run_sequence(
+            [sample(), sample(), sample("BAD"), sample("PRESENT")],
+            [120, 2, 2],
+            worker,
+        )
+        self.assertEqual(run.result, "usb_reconnected")
+        self.assertIn(unittest.mock.call(worker), run.stop.call_args_list)
+        self.assertEqual(run.launch_times, [120])
+
+    def test_transition_does_not_extend_battery_deadline(self):
+        run = self.run_sequence([sample(), sample("BAD"), sample("BAD")], [298, 2])
+        self.assertIn("usb_input_unsettled_at_test_end", run.result)
+        self.assertEqual(run.saved["elapsed_seconds"], 300)
 
     def test_isolated_usb_current_outlier_is_recorded_without_aborting(self):
         for current in (-526, 1139):

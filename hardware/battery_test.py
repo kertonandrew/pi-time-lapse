@@ -56,6 +56,8 @@ def validate_sample(raw, charging, cpu_temperature):
     if status.get("powerInput5vIo") != "NOT_PRESENT":
         raise TestStopped("gpio_external_input")
     source = status.get("powerInput")
+    if source in ("BAD", "WEAK"):
+        return None
     if source not in ("PRESENT", "NOT_PRESENT"):
         raise TestStopped("ambiguous_usb_input")
     return source == "NOT_PRESENT"
@@ -162,6 +164,7 @@ def run_test(hat, directory, maximum_wait=900):
     refreshed = 0.0
     last_phase = None
     consecutive_bad_current = 0
+    unsettled_since = None
     try:
         if value(hat.config.GetChargingConfig()).get("charging_enabled") is not False:
             raise TestStopped("charging_not_disabled")
@@ -194,6 +197,10 @@ def run_test(hat, directory, maximum_wait=900):
                     "charge_level_register": charge_level,
                     "quality_flags": quality_flags,
                     "pi_rail_energy_valid": not quality_flags,
+                    "usb_input_settling": raw["GetStatus"]
+                    .get("data", {})
+                    .get("powerInput")
+                    in ("BAD", "WEAK"),
                 }
                 record(stream, row)
                 charge_level_percent(charge_level)
@@ -211,6 +218,21 @@ def run_test(hat, directory, maximum_wait=900):
                 if now - refreshed >= 15:
                     set_countdown(hat, 120)
                     refreshed = time.monotonic()
+                if unsettled_since is not None and now - unsettled_since >= 10:
+                    raise TestStopped("usb_input_settling_timeout")
+                if battery_only is None:
+                    stop_worker(worker)
+                    worker = None
+                    if unsettled_since is None:
+                        unsettled_since = now
+                    if started is None and now - began >= maximum_wait:
+                        terminal = "usb_removal_wait_expired"
+                        break
+                    if started is not None and now - started >= 300:
+                        raise TestStopped("usb_input_unsettled_at_test_end")
+                    time.sleep(2)
+                    continue
+                unsettled_since = None
                 if started is None:
                     if now - began >= maximum_wait:
                         terminal = "usb_removal_wait_expired"

@@ -32,7 +32,13 @@ sudo journalctl -u pi-battery-test.service
 
 The unit waits up to 15 minutes for USB removal while recording readings every
 two seconds. Unplug only the USB cable into the PiJuice; leave its battery
-connected. CPU work starts only after the HAT reports battery-only power.
+connected. A BAD or WEAK USB report gets up to ten seconds to settle to
+PRESENT or NOT_PRESENT. Every sample still checks voltage, temperature, charging
+state and sensor validity. CPU work is stopped during settling, no battery phase
+starts until NOT_PRESENT, and settling never extends the five-minute battery
+window. Persistent ambiguity stops the trial. Raw transition readings are retained
+with `usb_input_settling` markers. CPU work starts only after the HAT reports
+battery-only power.
 Reconnect USB to stop the trial early. If USB is present when the trial stops,
 the Pi stays running. Otherwise it shuts down and asks the HAT to cut Pi power;
 press the PiJuice power button to restart after reconnecting USB if necessary.
