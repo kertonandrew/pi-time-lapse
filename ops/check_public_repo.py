@@ -92,6 +92,17 @@ PRIVATE_NAMES = {
     "config.json",
 }
 PRIVATE_DIRECTORIES = {"local", ".ssh", "secrets", "spool", "photos", "telemetry"}
+PUBLIC_DOC_PATHS = {
+    "docs/README.md",
+    "docs/deployment.md",
+    "docs/camera-workflow.md",
+    "docs/home-assistant.md",
+    "docs/ssh-receiver.md",
+    "docs/solar-transfer-design.md",
+    "docs/battery-charging-trial.md",
+    "docs/battery-discharge-test.md",
+    "docs/.gitignore",
+}
 
 
 @dataclass(frozen=True, order=True)
@@ -116,6 +127,11 @@ def safe_path(path: str) -> str:
     return path
 
 
+def is_private_documentation(path: str) -> bool:
+    relative = PurePosixPath(path)
+    return relative.is_relative_to("docs") and str(relative) not in PUBLIC_DOC_PATHS
+
+
 def scan_content(path: str, content: bytes) -> list[Finding]:
     """Return locations and categories without retaining matched values."""
     relative = PurePosixPath(path)
@@ -124,6 +140,8 @@ def scan_content(path: str, content: bytes) -> list[Finding]:
     def add(line, category):
         findings.add(Finding(safe_path(path), line, category))
 
+    if is_private_documentation(path):
+        add(0, "private_documentation")
     if (
         any(part.lower() in PRIVATE_DIRECTORIES for part in relative.parts)
         or relative.name.lower() in PRIVATE_NAMES
@@ -235,6 +253,8 @@ def scan_repository(
             continue
         metadata, encoded_path = entry.split(b"\t", 1)
         path = encoded_path.decode("utf-8", errors="replace")
+        if is_private_documentation(path):
+            findings.append(Finding(safe_path(path), 0, "private_documentation"))
         fields = metadata.decode("ascii").split()
         mode = fields[0]
         if mode != "100644" and mode != "100755":

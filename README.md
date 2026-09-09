@@ -71,6 +71,9 @@ charger. The normal installers do not enable these diagnostic units.
 
 ## Development
 
+See the [public documentation index](docs/README.md). Keep private test journals,
+receipts and generated reports in the ignored `local/` workspace.
+
 ```sh
 python3 -m unittest discover -s tests -p 'test_*.py' -q
 python3 -m unittest discover -s hardware -p 'test_*.py' -q

@@ -1,6 +1,6 @@
 # Security policy
 
-This project controls a camera, network transfers and battery-powered hardware. Use the current maintained branch and rerun the documented checks after changing configuration. Historical trial results describe one installation; they are not a hardware certification or a charging specification for another battery.
+This project controls a camera, network transfers and battery-powered hardware. Use the current maintained branch and rerun the documented checks after changing configuration. Diagnostic procedures are not a hardware certification or a charging specification for another battery.
 
 ## Report a vulnerability privately
 
@@ -10,9 +10,9 @@ No disclosure response time or independent security certification is currently p
 
 ## Keep installation data private
 
-Store actual installation configuration and exports under the ignored `local/` directory, or outside the repository. Keep only explicit example configuration in version control. Confirm a file is ignored before placing credentials or photographs there; Git ignore rules do not protect files that are already tracked or deliberately added with `git add -f`.
+Store actual installation configuration and exports under the ignored `local/` directory, or outside the repository. Keep only explicit example configuration in version control. Private test plans, iteration notes, deployment receipts and measurement reports belong under `local/`, even after identifiers are removed. Public documentation is curated in [the docs index](docs/README.md); new guides require an explicit allowlist entry. Confirm a file is ignored before placing credentials or photographs there; Git ignore rules do not protect files that are already tracked or deliberately added with `git add -f`.
 
-Passwords belong in restrictive credential files, not configuration literals, shell arguments, Git commits or logs. Use directory mode 0700 and file mode 0600 for local private material. Protect backups to the same standard. Configure your own device ID, endpoints, SSH account and data directories through the setup flow rather than copying installation details from historical records.
+Passwords belong in restrictive credential files, not configuration literals, shell arguments, Git commits or logs. Use directory mode 0700 and file mode 0600 for local private material. Protect backups to the same standard. Configure your own device ID, endpoints, SSH account and data directories through the setup flow.
 
 MQTT should use verified TLS, a dedicated identity per camera and exact topic ACLs. Give telemetry publishers, photo publishers and command publishers only the permissions their role requires. Discovery access is configuration access: restrict who can publish under the discovery prefix. Treat control-topic write permission as permission to change the camera's behavior. Keep the broker on a trusted network or authenticated private connection; do not expose an anonymous listener to the internet. See the [Home Assistant setup](docs/home-assistant.md) and the supplied [broker ACL example](deploy/home-assistant/mosquitto.acl.example).
 
@@ -36,7 +36,7 @@ To check tracked local edits before committing:
 python3 ops/check_public_repo.py --working-tree
 ```
 
-Untracked files are outside that check until added to Git. The guard deliberately rejects private runtime directories, local configuration, key containers, archives, photographs and telemetry exports. It does not broadly exempt test directories or example files: embedded credentials are still checked. The exact non-credential literals `example-only-password` and `REPLACE_ME`, documented generic accounts/endpoints and the zero-prefixed example UUID format are narrow exceptions. New intentional public fixtures or binary assets require an explicit reviewed rule change.
+Untracked files are outside that check until added to Git. The guard deliberately rejects private runtime directories, local configuration, key containers, archives, photographs and telemetry exports. It also rejects documentation outside the curated public guide list, including force-added ignored files. It does not broadly exempt test directories or example files: embedded credentials are still checked. The exact non-credential literals `example-only-password` and `REPLACE_ME`, documented generic accounts/endpoints and the zero-prefixed example UUID format are narrow exceptions. New intentional public fixtures or binary assets require an explicit reviewed rule change.
 
 CI runs the guard, application and hardware unit tests, a locked dependency installation and a package build on Python 3.11 and 3.13. Actions are pinned to commit IDs and the workflow has read-only repository permissions. Unit tests do not contact a real Pi or qualify battery safety. The opt-in Home Assistant and MQTT security acceptance scripts use isolated synthetic services and must be run separately when changing those interfaces.
 

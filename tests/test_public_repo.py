@@ -96,22 +96,54 @@ class ContentChecks(unittest.TestCase):
 
     def test_document_identity_placeholders_and_checksums_are_allowed(self):
         example = "00000000-0000-4000-8000-000000000001"
-        self.assertEqual(self.categories(example, "docs/trial.json"), set())
+        self.assertEqual(self.categories(example, "hardware/example.json"), set())
         identifier = "abcdabcd-" + "1234-4321-8123-abcdefabcdef"
         self.assertIn(
             "device_or_boot_identifier",
-            self.categories(identifier, "docs/trial.json"),
+            self.categories(identifier, "hardware/example.json"),
         )
         checksum = "abcdef0123456789" * 4
-        self.assertEqual(self.categories(checksum, "docs/result.json"), set())
+        self.assertEqual(self.categories(checksum, "hardware/example.json"), set())
         compact_id = "abc123" * 5 + "aa"
         self.assertIn(
             "device_or_capture_identifier",
-            self.categories(compact_id, "docs/trial.json"),
+            self.categories(compact_id, "hardware/example.json"),
         )
         mac = ":".join(["ab"] * 6)
         self.assertIn(
             "network_hardware_identifier", self.categories(mac, "hardware/README.md")
+        )
+
+    def test_only_curated_documentation_paths_are_public(self):
+        for path in (
+            "docs/README.md",
+            "docs/deployment.md",
+            "docs/camera-workflow.md",
+            "docs/home-assistant.md",
+            "docs/ssh-receiver.md",
+            "docs/solar-transfer-design.md",
+            "docs/battery-charging-trial.md",
+            "docs/battery-discharge-test.md",
+            "docs/.gitignore",
+        ):
+            with self.subTest(path=path):
+                self.assertEqual(self.categories("Public guide\n", path), set())
+        for path in (
+            "docs/session-2026-09-09.md",
+            "docs/receipt.json",
+            "docs/solar-field-session.md",
+            "docs/archive/README.md",
+            "docs/README.md.backup",
+            "docs/Readme.md",
+        ):
+            with self.subTest(path=path):
+                self.assertEqual(self.categories("", path), {"private_documentation"})
+
+    def test_permitted_guide_still_checks_for_credentials(self):
+        value = "unissued-" + "Z3" * 12
+        content = json.dumps({"password": value})
+        self.assertEqual(
+            self.categories(content, "docs/deployment.md"), {"inline_credential"}
         )
 
     def test_binary_and_oversized_inputs_fail_closed(self):
@@ -197,6 +229,47 @@ class RepositoryChecks(unittest.TestCase):
             "private_configuration_file",
             {f.category for f in guard.scan_repository(self.root, working_tree=True)},
         )
+
+    def test_force_tracked_private_docs_fail_both_repository_scan_modes(self):
+        self.commit("docs/.gitignore", "*\n!.gitignore\n!README.md\n")
+        paths = (
+            "docs/session-2026-09-09.md",
+            "docs/receipt.json",
+            "docs/solar-field-session.md",
+        )
+        for path in paths:
+            (self.root / path).write_text("{}\n")
+            self.git("check-ignore", "--", path)
+        self.assertEqual(guard.scan_repository(self.root, working_tree=True), [])
+        self.git("add", "--force", "--", *paths)
+        expected = {guard.Finding(path, 0, "private_documentation") for path in paths}
+        self.assertEqual(
+            set(guard.scan_repository(self.root, working_tree=True)), expected
+        )
+        self.git("commit", "--quiet", "-m", "Track synthetic private documents")
+        self.assertEqual(set(guard.scan_repository(self.root)), expected)
+
+    def test_curated_guides_pass_repository_scan(self):
+        self.commit("docs/deployment.md", "Public deployment guide\n")
+        self.commit("docs/battery-charging-trial.md", "Public battery guide\n")
+        self.assertEqual(guard.scan_repository(self.root), [])
+        self.assertEqual(guard.scan_repository(self.root, working_tree=True), [])
+
+    def test_private_documentation_category_survives_size_limit(self):
+        path = "docs/receipt.json"
+        self.commit(path, "12345")
+        with patch.object(guard, "MAX_FILE_BYTES", 4):
+            for working_tree in (False, True):
+                with self.subTest(working_tree=working_tree):
+                    self.assertEqual(
+                        set(
+                            guard.scan_repository(self.root, working_tree=working_tree)
+                        ),
+                        {
+                            guard.Finding(path, 0, "private_documentation"),
+                            guard.Finding(path, 0, "file_exceeds_scan_limit"),
+                        },
+                    )
 
     def test_symlinks_are_not_followed(self):
         self.commit("README.md", "Public example\n")
