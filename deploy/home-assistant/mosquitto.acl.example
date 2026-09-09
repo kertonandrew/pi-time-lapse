@@ -1,0 +1,34 @@
+user timelapse-zero-01
+ topic write homeassistant/device/timelapse-zero-01/config
+ topic write pi_timelapse/timelapse-zero-01/state
+ topic write pi_timelapse/timelapse-zero-01/connection/telemetry
+ topic read pi_timelapse/timelapse-zero-01/desired/capture_enabled
+ topic read pi_timelapse/timelapse-zero-01/desired/interval_seconds
+ topic read pi_timelapse/timelapse-zero-01/desired/resolution
+ topic read pi_timelapse/timelapse-zero-01/desired/jpeg_quality
+ topic read pi_timelapse/timelapse-zero-01/desired/rotation
+ topic read pi_timelapse/timelapse-zero-01/desired/settle_ms
+ topic write pi_timelapse/timelapse-zero-01/reported/capture_enabled
+ topic write pi_timelapse/timelapse-zero-01/reported/interval_seconds
+ topic write pi_timelapse/timelapse-zero-01/reported/resolution
+ topic write pi_timelapse/timelapse-zero-01/reported/jpeg_quality
+ topic write pi_timelapse/timelapse-zero-01/reported/rotation
+ topic write pi_timelapse/timelapse-zero-01/reported/settle_ms
+ topic write pi_timelapse/timelapse-zero-01/connection/controls
+
+user timelapse-archive
+ topic write homeassistant/device/timelapse-zero-01/config
+ topic write pi_timelapse/timelapse-zero-01/image
+ topic write pi_timelapse/timelapse-zero-01/image_metadata
+ topic write pi_timelapse/timelapse-zero-01/connection/photos
+
+user homeassistant
+ topic read homeassistant/#
+ topic read pi_timelapse/#
+ topic write homeassistant/status
+ topic write pi_timelapse/timelapse-zero-01/desired/capture_enabled
+ topic write pi_timelapse/timelapse-zero-01/desired/interval_seconds
+ topic write pi_timelapse/timelapse-zero-01/desired/resolution
+ topic write pi_timelapse/timelapse-zero-01/desired/jpeg_quality
+ topic write pi_timelapse/timelapse-zero-01/desired/rotation
+ topic write pi_timelapse/timelapse-zero-01/desired/settle_ms

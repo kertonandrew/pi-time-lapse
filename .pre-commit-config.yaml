@@ -25,5 +25,6 @@ repos:
             --follow-imports=silent,
             --ignore-missing-imports,
             --allow-redefinition,
+            --explicit-package-bases,
             --python-version=3.11,
           ]

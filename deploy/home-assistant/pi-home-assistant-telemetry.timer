@@ -1,0 +1,13 @@
+[Unit]
+Description=Publish timelapse metrics every five minutes while awake
+
+[Timer]
+OnBootSec=6min
+OnUnitInactiveSec=5min
+AccuracySec=15s
+RandomizedDelaySec=15s
+Persistent=false
+Unit=pi-home-assistant-telemetry.service
+
+[Install]
+WantedBy=timers.target

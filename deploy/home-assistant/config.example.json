@@ -1,0 +1,35 @@
+{
+  "device_id": "timelapse-zero-01",
+  "device_name": "Solar timelapse",
+  "topic_prefix": "pi_timelapse",
+  "discovery_prefix": "homeassistant",
+  "discovery_refresh_seconds": 300,
+  "state_directory": "/var/lib/pi-home-assistant",
+  "mqtt": {
+    "host": "mqtt.example.internal",
+    "port": 8883,
+    "tls": true,
+    "username": "timelapse-zero-01",
+    "password_file": "/etc/pi-home-assistant/mqtt-password",
+    "ca_file": "/etc/pi-home-assistant/ca.crt",
+    "cert_file": null,
+    "key_file": null,
+    "timeout_seconds": 20
+  },
+  "telemetry": {
+    "database": "/var/lib/pi-hardware/metrics.sqlite3",
+    "spool": "/var/lib/pi-timelapse",
+    "max_age_seconds": 420,
+    "expire_after_seconds": 900,
+    "minimum_battery_voltage_mv": 3700
+  },
+  "photos": {
+    "archive_root": "/srv/pi-timelapse",
+    "max_bytes": 8388608,
+    "republish_seconds": 3600
+  },
+  "controls": {
+    "timelapse_config": "/etc/pi-timelapse.json",
+    "poll_seconds": 3
+  }
+}

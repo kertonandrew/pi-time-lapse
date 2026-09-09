@@ -1,0 +1,12 @@
+[Unit]
+Description=Check measured solar opportunities every five minutes while powered
+
+[Timer]
+OnBootSec=4min
+OnUnitActiveSec=5min
+AccuracySec=5s
+Persistent=false
+Unit=pi-timelapse-transfer.service
+
+[Install]
+WantedBy=timers.target

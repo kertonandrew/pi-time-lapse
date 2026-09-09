@@ -1,0 +1,19 @@
+[Unit]
+Description=Record PiJuice power and system health
+After=pijuice.service
+
+[Service]
+Type=simple
+User=root
+Nice=10
+StateDirectory=pi-hardware
+StateDirectoryMode=0750
+UMask=0027
+EnvironmentFile=-/etc/default/pi-hardware
+ExecStart=/usr/bin/python3 -u /usr/local/lib/pi-time-lapse/power_monitor.py
+Restart=on-failure
+RestartSec=10s
+TimeoutStopSec=15s
+
+[Install]
+WantedBy=multi-user.target

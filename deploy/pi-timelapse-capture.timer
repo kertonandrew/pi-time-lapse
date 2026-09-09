@@ -1,0 +1,12 @@
+[Unit]
+Description=Check the configured timelapse capture schedule while powered
+
+[Timer]
+OnBootSec=2min
+OnUnitInactiveSec=60s
+AccuracySec=1s
+Persistent=false
+Unit=pi-timelapse-capture.service
+
+[Install]
+WantedBy=timers.target
