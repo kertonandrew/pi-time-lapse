@@ -7,7 +7,7 @@ requires-python = ">=3.11"
 dependencies = []
 
 [project.optional-dependencies]
-homeassistant = ["paho-mqtt==2.1.0"]
+homeassistant = ["paho-mqtt==2.2.0"]
 
 [build-system]
 requires = ["setuptools>=83.0.0"]
